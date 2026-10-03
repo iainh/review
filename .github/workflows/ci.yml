@@ -39,7 +39,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake libclang-dev libfontconfig1-dev \
-            libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev
+            libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            desktop-file-utils libglib2.0-bin
       - name: Configure Windows libclang
         if: runner.os == 'Windows'
         run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
@@ -57,8 +58,15 @@ jobs:
         run: cargo clippy --locked --all-targets --target "${{ matrix.target }}" -- -D warnings
       - name: Test
         run: cargo test --locked --all-targets --target "${{ matrix.target }}"
+      - name: Test Linux desktop registration
+        if: runner.os == 'Linux'
+        run: bash tests/linux-desktop.sh
       - name: Build release executable
         run: cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Test Windows PDF registration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/test-windows-associations.ps1
       - name: Package and smoke-test
         run: bash .github/scripts/package.sh "${{ matrix.target }}"
       - name: Upload package
