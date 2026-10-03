@@ -374,6 +374,7 @@ pub(crate) mod tests {
             }
         );
         assert!(document.session_password.is_none());
+        drop(document);
         encrypted_fixture(
             &path,
             "",
