@@ -18,6 +18,7 @@ wayland-scanner private-code "$scratch/virtual-pointer.xml" "$scratch/virtual-po
 cc -Wall -Wextra -Werror -I"$scratch" tests/wayland-pointer.c "$scratch/virtual-pointer.c" \
     $(pkg-config --cflags --libs wayland-client) -o "$scratch/pointer"
 binary=$(realpath target/debug/review)
+geometry=$(realpath tests/pdf-page-geometry.py)
 pdf=$(realpath "$pdf")
 swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$pdf'" >/dev/null
 
@@ -53,6 +54,16 @@ goto_page() {
 }
 key() {
     wtype -s 150 -k "$1" -s 150
+}
+control_click() {
+    # Use native bounds so toolbar rows and outline wrapping cannot move the target.
+    rm -f "$scratch/control.json"
+    swaymsg "exec /usr/bin/python3 '$geometry' '$scratch/control.json' '$1' 'push button' > '$scratch/control.log' 2>&1" >/dev/null
+    for _ in {1..150}; do [[ -s "$scratch/control.json" ]] && break; sleep .1; done
+    if [[ ! -s "$scratch/control.json" ]]; then cat "$scratch/control.log" >&2; exit 1; fi
+    local x y width height
+    read -r x y width height < <(jq -r '@tsv' "$scratch/control.json")
+    "$scratch/pointer" click "$((x + width / 2))" "$((y + height / 2))"
 }
 capture() {
     if [[ -n ${REVIEW_SCREENSHOTS:-} ]]; then
@@ -179,19 +190,22 @@ expect_page 1 2
 # Sidebar preferences now follow the reader between documents.
 # Window titles precede first-frame presentation with background rendering.
 sleep 0.4
-"$scratch/pointer" click 30 99
+control_click 'Outline'
 # Let the outline tab replace the thumbnail view before clicking a destination.
 sleep 0.4
 capture sidebar-nested-outline
-"$scratch/pointer" click 100 150
+control_click 'Nested chapter two  ·  Page 2'
+read -r child_x child_y < <(jq -r '[(.[0] + .[2] / 2 | floor), (.[1] + .[3] / 2 | floor)] | @tsv' "$scratch/control.json")
 expect_page 2 2
-"$scratch/pointer" click 100 127
+control_click 'Chapter one  ·  Page 1'
 expect_page 1 2
-"$scratch/pointer" click 13 127
+control_click 'Collapse Chapter one'
+sleep 0.4
 capture sidebar-outline-collapsed
-"$scratch/pointer" click 100 150
+# The former child position must no longer activate its hidden destination.
+"$scratch/pointer" click "$child_x" "$child_y"
 expect_page 1 2
-"$scratch/pointer" click 13 127
-"$scratch/pointer" click 100 150
+control_click 'Expand Chapter one'
+control_click 'Nested chapter two  ·  Page 2'
 expect_page 2 2
 echo 'PASS: Wayland nested outline, collapse/expand, and destination navigation'
