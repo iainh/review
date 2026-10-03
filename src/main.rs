@@ -21,24 +21,35 @@ struct App {
     viewer: Viewer,
     renderer: Option<Renderer>,
     repaint_at: Option<Instant>,
+    fatal_error: Option<anyhow::Error>,
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.renderer.is_some() {
+        if self.renderer.is_some() || self.fatal_error.is_some() {
             return;
         }
         let attributes = Window::default_attributes()
             .with_title("Review")
             .with_inner_size(winit::dpi::LogicalSize::new(960, 720));
-        let window = Arc::new(
-            event_loop
-                .create_window(attributes)
-                .expect("failed to create window"),
-        );
-        self.renderer =
-            Some(pollster::block_on(Renderer::new(window)).expect("failed to initialize graphics"));
-        self.renderer.as_ref().unwrap().window().request_redraw();
+        let renderer = (|| {
+            let window = Arc::new(
+                event_loop
+                    .create_window(attributes)
+                    .context("failed to create window")?,
+            );
+            pollster::block_on(Renderer::new(window)).context("failed to initialize graphics")
+        })();
+        match renderer {
+            Ok(renderer) => {
+                renderer.window().request_redraw();
+                self.renderer = Some(renderer);
+            }
+            Err(error) => {
+                self.fatal_error = Some(error);
+                event_loop.exit();
+            }
+        }
     }
 
     fn window_event(
@@ -105,10 +116,16 @@ fn main() -> Result<()> {
     }
     let document = PdfDocument::open(path)?;
     let event_loop = EventLoop::new().context("failed to create event loop")?;
-    event_loop.run_app(&mut App {
+    let mut app = App {
         viewer: Viewer::new(document),
         renderer: None,
         repaint_at: None,
-    })?;
+        fatal_error: None,
+    };
+    let event_result = event_loop.run_app(&mut app);
+    if let Some(error) = app.fatal_error {
+        return Err(error);
+    }
+    event_result.context("event loop failed")?;
     Ok(())
 }

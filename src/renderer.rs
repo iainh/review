@@ -138,7 +138,10 @@ impl Renderer {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface = self.instance.create_surface(self.window.clone())?;
+                self.surface = self
+                    .instance
+                    .create_surface(self.window.clone())
+                    .context("failed to recreate lost drawing surface")?;
                 self.surface.configure(&self.device, &self.config);
                 self.window.request_redraw();
                 return Ok(());

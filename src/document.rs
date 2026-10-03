@@ -29,8 +29,12 @@ impl PdfDocument {
         let path = path.as_ref().to_path_buf();
         let document = Document::open(path.as_path())
             .with_context(|| format!("failed to open PDF at {}", path.display()))?;
-        let page_count = usize::try_from(document.page_count()?)
-            .context("PDF reported a negative page count")?;
+        let page_count = usize::try_from(
+            document
+                .page_count()
+                .context("failed to read PDF page count")?,
+        )
+        .context("PDF reported a negative page count")?;
         ensure!(page_count > 0, "PDF contains no pages");
 
         Ok(Self {
@@ -75,9 +79,17 @@ impl PdfDocument {
         if query.trim().is_empty() {
             return Ok(vec![]);
         }
-        let page = self.document.load_page(page_number as i32)?;
-        let bounds = page.bounds()?;
-        let text = page.to_text_page(TextPageFlags::empty())?;
+        let page_label = page_number + 1;
+        let page = self
+            .document
+            .load_page(page_number as i32)
+            .with_context(|| format!("failed to load page {page_label}"))?;
+        let bounds = page
+            .bounds()
+            .with_context(|| format!("failed to read bounds for page {page_label}"))?;
+        let text = page
+            .to_text_page(TextPageFlags::empty())
+            .with_context(|| format!("failed to read text from page {page_label}"))?;
         let mut matches = Vec::new();
         // The callback groups multiline quads into one occurrence and has no
         // fixed hit limit, unlike Page::search.
@@ -97,12 +109,15 @@ impl PdfDocument {
                     .collect(),
             });
             SearchHitResponse::ContinueSearch
-        })?;
+        })
+        .with_context(|| format!("failed to search page {page_label}"))?;
         Ok(matches)
     }
 
     pub fn outlines(&self) -> Result<Vec<mupdf::Outline>> {
-        Ok(self.document.outlines()?)
+        self.document
+            .outlines()
+            .context("failed to read PDF outline")
     }
 
     pub fn render_page(
@@ -112,8 +127,14 @@ impl PdfDocument {
         zoom: f32,
     ) -> Result<PageImage> {
         ensure!(page_number < self.page_count, "page is out of range");
-        let page = self.document.load_page(page_number as i32)?;
-        let bounds = page.bounds()?;
+        let page_label = page_number + 1;
+        let page = self
+            .document
+            .load_page(page_number as i32)
+            .with_context(|| format!("failed to load page {page_label}"))?;
+        let bounds = page
+            .bounds()
+            .with_context(|| format!("failed to read bounds for page {page_label}"))?;
         let page_width = bounds.x1 - bounds.x0;
         let page_height = bounds.y1 - bounds.y0;
         ensure!(
@@ -122,12 +143,14 @@ impl PdfDocument {
         );
 
         let scale = fit_scale(viewport, (page_width, page_height), zoom);
-        let pixmap = page.to_pixmap(
-            &Matrix::new_scale(scale, scale),
-            &Colorspace::device_rgb(),
-            false,
-            true,
-        )?;
+        let pixmap = page
+            .to_pixmap(
+                &Matrix::new_scale(scale, scale),
+                &Colorspace::device_rgb(),
+                false,
+                true,
+            )
+            .with_context(|| format!("failed to rasterize page {page_label}"))?;
         ensure!(pixmap.n() == 3, "MuPDF returned an unexpected pixel format");
 
         Ok(PageImage {
