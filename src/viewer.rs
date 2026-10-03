@@ -1,10 +1,17 @@
 use egui::{Color32, Context, Key, Modifiers, TextureHandle, Vec2};
 
-use crate::{document::PdfDocument, search::Search, sidebar::Sidebar};
+use crate::{
+    document::PdfDocument,
+    search::Search,
+    sidebar::Sidebar,
+    zoom::{POINT_SCALE, Zoom},
+};
 
 pub struct Viewer {
     document: PdfDocument,
-    zoom: f32,
+    zoom: Zoom,
+    effective_zoom: f32,
+    zoom_input: String,
     page_input: String,
     error: Option<String>,
     page_texture: Option<TextureHandle>,
@@ -20,7 +27,9 @@ impl Viewer {
         let sidebar = Sidebar::new(&document);
         Self {
             document,
-            zoom: 1.0,
+            zoom: Zoom::FitPage,
+            effective_zoom: 1.0,
+            zoom_input: "100".into(),
             page_input: "1".into(),
             error: None,
             page_texture: None,
@@ -34,11 +43,11 @@ impl Viewer {
 
     pub fn title(&self) -> String {
         format!(
-            "Review — {} — {}/{} — {:.0}%",
+            "Review — {} — {}/{} — {}",
             self.document.name(),
             self.document.current_page() + 1,
             self.document.page_count(),
-            self.zoom * 100.0
+            self.zoom.label()
         )
     }
 
@@ -76,9 +85,17 @@ impl Viewer {
         }
     }
 
+    fn change_zoom(&mut self, factor: f32) {
+        self.zoom.change(factor, self.effective_zoom);
+        if let Zoom::Percent(value) = self.zoom {
+            self.effective_zoom = value;
+        }
+    }
+
     pub fn ui(&mut self, root: &mut egui::Ui, open_requested: &mut bool) {
         let ctx = root.ctx().clone();
         let focus_page = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::G));
+        let focus_zoom = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::L));
         if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F9)) {
             self.sidebar.open = !self.sidebar.open;
         }
@@ -165,14 +182,56 @@ impl Viewer {
                 }
                 ui.separator();
                 if ui.button("−").clicked() {
-                    self.zoom = (self.zoom * 0.8).max(0.25);
+                    self.change_zoom(0.8);
                 }
-                ui.label(format!("{:.0}%", self.zoom * 100.0));
+                let field = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.zoom_input)
+                            .id(egui::Id::new("zoom_input"))
+                            .desired_width(44.0),
+                    )
+                    .on_hover_text("Zoom percentage (Ctrl+L / Cmd+L), 10–1600%");
+                if focus_zoom {
+                    select_text(&ctx, &field, self.zoom_input.chars().count());
+                }
+                ui.label("%");
+                if field.lost_focus()
+                    && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter))
+                {
+                    match Zoom::parse(&self.zoom_input) {
+                        Some(zoom) => {
+                            self.zoom = zoom;
+                            self.error = None;
+                        }
+                        None => self.error = Some("Enter a zoom from 10 to 1600%".into()),
+                    }
+                }
+                if (field.has_focus() || field.lost_focus())
+                    && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+                {
+                    field.surrender_focus();
+                }
+                if !focus_zoom && !field.has_focus() && !field.lost_focus() {
+                    let text = format!("{:.0}", self.effective_zoom * 100.0);
+                    if self.zoom_input != text {
+                        self.zoom_input = text;
+                        ctx.request_repaint();
+                    }
+                }
                 if ui.button("+").clicked() {
-                    self.zoom = (self.zoom * 1.25).min(4.0);
+                    self.change_zoom(1.25);
                 }
-                if ui.button("Fit page").clicked() {
-                    self.zoom = 1.0;
+                if ui
+                    .selectable_label(self.zoom == Zoom::FitPage, "Fit page")
+                    .clicked()
+                {
+                    self.zoom = Zoom::FitPage;
+                }
+                if ui
+                    .selectable_label(self.zoom == Zoom::FitWidth, "Fit width")
+                    .clicked()
+                {
+                    self.zoom = Zoom::FitWidth;
                 }
                 ui.separator();
                 if ui
@@ -269,14 +328,21 @@ impl Viewer {
                 if input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::PageDown) {
                     self.change_page(1);
                 }
+                if input.key_pressed(Key::Num1) {
+                    self.zoom = Zoom::Percent(1.0);
+                    self.effective_zoom = 1.0;
+                }
                 if input.key_pressed(Key::Plus) || input.key_pressed(Key::Equals) {
-                    self.zoom = (self.zoom * 1.25).min(4.0);
+                    self.change_zoom(1.25);
                 }
                 if input.key_pressed(Key::Minus) {
-                    self.zoom = (self.zoom * 0.8).max(0.25);
+                    self.change_zoom(0.8);
                 }
                 if input.key_pressed(Key::Num0) {
-                    self.zoom = 1.0;
+                    self.zoom = Zoom::FitPage;
+                }
+                if input.key_pressed(Key::Num2) {
+                    self.zoom = Zoom::FitWidth;
                 }
                 self.quit = input.key_pressed(Key::Q) || input.key_pressed(Key::Escape);
             });
@@ -294,12 +360,33 @@ impl Viewer {
             let available = ui.available_size();
             let dpi = ctx.pixels_per_point();
             let viewport = ((available.x * dpi) as u32, (available.y * dpi) as u32);
-            let key = (self.document.current_page(), viewport, self.zoom);
+            let size = match self.document.page_size(self.document.current_page()) {
+                Ok(size) => size,
+                Err(error) => {
+                    self.error = Some(format!("Failed to read page size: {error:#}"));
+                    return;
+                }
+            };
+            let scale = self.zoom.scale(viewport, size, dpi);
+            let effective = scale / (POINT_SCALE * dpi);
+            if self.effective_zoom != effective {
+                self.effective_zoom = effective;
+                ctx.request_repaint();
+            }
+            let key = (self.document.current_page(), viewport, scale);
             if self.rendered != Some(key) {
-                match self
-                    .document
-                    .render_page(self.document.current_page(), viewport, self.zoom)
-                {
+                let max_side = ctx.input(|input| input.max_texture_side) as f32;
+                let image =
+                    if (size.0 * scale).ceil() > max_side || (size.1 * scale).ceil() > max_side {
+                        Err(anyhow::anyhow!(
+                            "This zoom exceeds the graphics texture limit; reduce the zoom"
+                        ))
+                    } else {
+                        self.document
+                            .render_at_scale(self.document.current_page(), scale)
+                    };
+                self.rendered = Some(key);
+                match image {
                     Ok(image) => {
                         self.page_texture = Some(ctx.load_texture(
                             "PDF page",
@@ -309,7 +396,6 @@ impl Viewer {
                             ),
                             egui::TextureOptions::LINEAR,
                         ));
-                        self.rendered = Some(key);
                     }
                     Err(error) => {
                         self.page_texture = None;
@@ -398,6 +484,52 @@ fn select_text(ctx: &Context, response: &egui::Response, len: usize) {
 #[cfg(test)]
 mod tests {
     use super::{Viewer, parse_page};
+
+    #[test]
+    fn zoom_entry_applies_typed_value_and_escape_cancels_without_quitting() {
+        let mut viewer = Viewer::new(crate::document::tests::sample_document());
+        let ctx = egui::Context::default();
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            modifiers,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+        };
+        for events in [
+            vec![key(egui::Key::L, egui::Modifiers::COMMAND)],
+            vec![egui::Event::Text("137.5".into())],
+            vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
+        }
+        assert_eq!(viewer.zoom, crate::zoom::Zoom::Percent(1.375));
+        for events in [
+            vec![key(egui::Key::L, egui::Modifiers::COMMAND)],
+            vec![egui::Event::Text("300".into())],
+            vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
+        }
+        assert_eq!(viewer.zoom, crate::zoom::Zoom::Percent(1.375));
+        assert!(!viewer.quit);
+    }
 
     #[test]
     fn page_editing_consumes_q_and_escape_without_quitting() {

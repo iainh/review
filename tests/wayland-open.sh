@@ -90,9 +90,10 @@ choose cancel
 expect_title Review
 open_dialog
 choose "$scratch/résumé 日本語 document.pdf"
-expect_title 'Review — résumé 日本語 document.pdf — 1/2 — 100%'
+expect_title 'Review — résumé 日本語 document.pdf — 1/2 — Fit page'
 capture open-loaded
 key Right
+key 1
 key equal
 expect_title 'Review — résumé 日本語 document.pdf — 2/2 — 125%'
 open_dialog
@@ -106,6 +107,6 @@ key Escape
 expect_title 'Review — résumé 日本語 document.pdf — 2/2 — 125%'
 open_dialog
 choose "$scratch/outline.pdf"
-expect_title 'Review — outline.pdf — 1/2 — 100%'
+expect_title 'Review — outline.pdf — 1/2 — Fit page'
 capture open-replaced
 echo 'PASS: native open, Unicode path, cancel, failure recovery, and document replacement'

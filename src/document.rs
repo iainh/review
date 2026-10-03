@@ -139,13 +139,27 @@ impl PdfDocument {
             .context("failed to read PDF outline")
     }
 
+    pub fn page_size(&self, page_number: usize) -> Result<(f32, f32)> {
+        ensure!(page_number < self.page_count, "page is out of range");
+        let bounds = self.document.load_page(page_number as i32)?.bounds()?;
+        let size = (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
+        ensure!(size.0 > 0.0 && size.1 > 0.0, "page has invalid bounds");
+        Ok(size)
+    }
+
     pub fn render_page(
         &self,
         page_number: usize,
         viewport: (u32, u32),
         zoom: f32,
     ) -> Result<PageImage> {
+        let size = self.page_size(page_number)?;
+        self.render_at_scale(page_number, fit_scale(viewport, size, zoom))
+    }
+
+    pub fn render_at_scale(&self, page_number: usize, scale: f32) -> Result<PageImage> {
         ensure!(page_number < self.page_count, "page is out of range");
+        ensure!(scale.is_finite() && scale > 0.0, "invalid rendering scale");
         let page_label = page_number + 1;
         let page = self
             .document
@@ -161,7 +175,10 @@ impl PdfDocument {
             "page has invalid bounds"
         );
 
-        let scale = fit_scale(viewport, (page_width, page_height), zoom);
+        ensure!(
+            (page_width * scale).ceil() * (page_height * scale).ceil() <= 64_000_000.0,
+            "This zoom exceeds the page rendering memory limit; reduce the zoom"
+        );
         let pixmap = page
             .to_pixmap(
                 &Matrix::new_scale(scale, scale),
@@ -321,6 +338,17 @@ pub(crate) mod tests {
         );
         assert_eq!(document.current_page(), 0);
         assert!(document.render_page(2, (244, 244), 1.0).is_err());
+    }
+
+    #[test]
+    fn explicit_scale_respects_page_bounds_and_rejects_invalid_scales() {
+        let document = sample_document();
+        assert_eq!(document.page_size(0).unwrap(), (300.0, 400.0));
+        let image = document.render_at_scale(0, 2.0).unwrap();
+        assert_eq!((image.width, image.height), (600, 800));
+        for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(document.render_at_scale(0, scale).is_err());
+        }
     }
 
     #[test]

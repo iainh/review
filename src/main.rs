@@ -7,6 +7,7 @@ mod renderer;
 mod search;
 mod sidebar;
 mod viewer;
+mod zoom;
 
 use std::{env, ffi::OsString, path::PathBuf, sync::Arc, time::Instant};
 
@@ -345,7 +346,7 @@ mod tests {
                 egui::Pos2::ZERO,
                 egui::vec2(960.0, 720.0),
             )),
-            events: [Key::ArrowRight, Key::Plus]
+            events: [Key::ArrowRight, Key::Num1, Key::Plus]
                 .map(|key| egui::Event::Key {
                     key,
                     physical_key: None,
@@ -367,7 +368,7 @@ mod tests {
         app.open(path);
         assert_eq!(
             app.viewer.as_ref().unwrap().title(),
-            "Review — new document.pdf — 1/2 — 100%"
+            "Review — new document.pdf — 1/2 — Fit page"
         );
         assert!(app.open_error.is_none());
     }

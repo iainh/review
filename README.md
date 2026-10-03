@@ -24,8 +24,14 @@ Password-protected PDFs are not supported.
 for a filename that starts with a dash. Review displays one PDF at a time.
 
 Use **Left**/**Page Up** and **Right**/**Page Down** to change pages, **+** and
-**-** to zoom, **0** to fit the page, and **Q** or **Escape** to quit when not
-editing a field. Zoomed pages can be scrolled horizontally and vertically.
+**-** to zoom, **0** to fit the page, **1** for 100%, **2** to fit the width,
+and **Q** or **Escape** to quit when not editing a field. Zoomed pages can be
+scrolled horizontally and vertically. Use **Ctrl+L** (**Cmd+L** on macOS) to
+enter a zoom from 10 to 1600%; **Enter** applies it and **Escape** cancels.
+Percentage zoom is independent of window size: 100% uses 96 logical pixels
+per inch for PDF points (72 per inch). Fit modes adapt to the viewport and
+display their effective percentage. Very large page renders report a memory
+limit error instead of allocating an unbounded image.
 
 Use **Ctrl+G** (**Cmd+G** on macOS) to select the page field. Enter a page
 number and press **Enter** or click **Go**. Page numbers start at one; invalid

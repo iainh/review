@@ -35,6 +35,17 @@ expect_page() {
     echo "Expected page $1; got: $(title)" >&2
     exit 1
 }
+expect_zoom() {
+    for _ in {1..50}; do
+        if [[ $(title) == *" — $1" ]]; then
+            echo "PASS: zoom $1"
+            return
+        fi
+        sleep 0.1
+    done
+    echo "Expected zoom $1; got: $(title)" >&2
+    exit 1
+}
 goto_page() {
     # Give the client time to bind the temporary virtual keyboard before input,
     # and to receive its final key before wtype destroys the device.
@@ -72,11 +83,23 @@ expect_page 23
 expect_page 24
 "$scratch/pointer" click 110 12
 expect_page 23
+key 1
+expect_zoom '100%'
 key equal
-[[ $(title) == *' — 125%' ]]
+expect_zoom '125%'
 capture zoomed-page
 key 0
-[[ $(title) == *' — 100%' ]]
+expect_zoom 'Fit page'
+key 2
+expect_zoom 'Fit width'
+capture fit-width
+wtype -s 150 -M ctrl -k l -m ctrl -s 150 '137.5' -s 150 -k Return -s 150
+expect_zoom '138%'
+capture explicit-zoom
+wtype -s 150 -M ctrl -k l -m ctrl -s 150 'NaN' -s 150 -k Return -s 150
+expect_zoom '138%'
+capture invalid-zoom
+key 0
 goto_page 45
 expect_page 45
 key Next
