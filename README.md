@@ -55,11 +55,24 @@ Invalid or duplicate labels leave the current page unchanged; use a physical
 number to disambiguate. **Escape** cancels page editing.
 
 Use **Ctrl+F** (**Cmd+F** on macOS) or **Search** to find text. Press **Enter**
-or click **Find** to search the document, ignoring case. **Enter**/**F3**
-advances to the next occurrence; **Shift+Enter**/**Shift+F3** goes back.
-Search wraps at both ends. The current occurrence is orange and other matches
-on the page are yellow. **Escape** or **Close** closes search and clears highlights.
-Search uses the PDF's text layer; scanned images without text require OCR.
+or click **Find** to search the document. Results appear while a background
+worker scans, starting at the current page. The progress shows pages scanned
+and matches found so far. Click a page-labelled snippet or use **Enter**/**F3**
+to advance; **Shift+Enter**/**Shift+F3** goes back. Navigation wraps through
+the available results, even while scanning. Later results never move your
+selected occurrence.
+
+Search ignores case by default using Unicode case folding. Enable **Case
+sensitive** or **Whole words** to narrow matches; changing either option
+restarts a submitted search. Whole words follow Unicode word boundaries,
+including combining marks. Spaces, tabs and line breaks compare as one space,
+so phrases can span lines. Search is literal, not a regular expression, and
+does not equate accented and unaccented characters. Editing the query cancels
+old work and clears its results; press **Enter** or **Find** to submit again.
+The current occurrence is orange and other matches on the page are yellow.
+**Escape** or **Close** cancels search and clears highlights. Search uses the
+shared native or session OCR text. Recognition and layer changes restart an
+active search automatically; native PDF text remains authoritative.
 
 Drag across page text to select it, double-click a word or triple-click a
 paragraph. Use **Ctrl+A** (**Cmd+A** on macOS) to select all text on the
@@ -426,6 +439,11 @@ Wayland, including native AT-SPI read-only text before and after recognition.
 It needs `python3-pyatspi` and Sway's D-Bus session, as above. It uses synthetic
 PDFs and never downloads language data or submits print jobs. Set
 `REVIEW_SCREENSHOTS` to capture the affected states.
+
+`bash tests/wayland-search.sh` checks progressive result navigation, query
+cancellation, matching options, snippet navigation and copy-independent search
+using synthetic PDFs, including a long scan. Set `REVIEW_SCREENSHOTS` to capture
+the affected native states for inspection.
 
 For headless Wayland testing, start Sway with `tests/sway.conf`,
 `WLR_BACKENDS=headless`, `WLR_RENDERER=pixman`, and `WLR_LIBINPUT_NO_DEVICES=1`.

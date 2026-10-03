@@ -115,44 +115,6 @@ impl PageText {
         self.text(0..self.chars.len())
     }
 
-    /// OCR fallback search. Match Unicode lowercase and whitespace across
-    /// lines while retaining the original glyph indices for highlights.
-    pub fn search(&self, query: &str) -> Vec<Vec<Quad>> {
-        let normalize = |text: &str| {
-            text.split_whitespace()
-                .map(str::to_lowercase)
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let query = normalize(query);
-        if query.is_empty() {
-            return Vec::new();
-        }
-        let mut text = String::new();
-        let mut indices = Vec::new();
-        for (index, ch) in self.chars.iter().enumerate() {
-            if ch.ch.is_whitespace() {
-                if !text.is_empty() && !text.ends_with(' ') {
-                    text.push(' ');
-                    indices.push(index);
-                }
-            } else {
-                for folded in ch.ch.to_lowercase() {
-                    text.push(folded);
-                    indices.extend(std::iter::repeat_n(index, folded.len_utf8()));
-                }
-            }
-        }
-        text.match_indices(&query)
-            .map(|(start, _)| {
-                let range = indices[start]..indices[start + query.len() - 1] + 1;
-                // Keep each glyph's quad; joining boxes can highlight adjacent
-                // columns or whitespace that is not part of the match.
-                self.chars[range].iter().filter_map(|ch| ch.quad).collect()
-            })
-            .collect()
-    }
-
     pub fn text(&self, range: Range<usize>) -> String {
         self.chars[range].iter().map(|ch| ch.ch).collect()
     }

@@ -604,9 +604,11 @@ pub(crate) mod tests {
         assert_eq!(page.chars[4].quad.unwrap()[0][0], 0.6);
         assert_eq!(page.hit([0.69, 0.12]).unwrap().caret, 4);
         assert_eq!(page.hit([0.61, 0.12]).unwrap().caret, 5);
-        assert_eq!(page.search("אב İX").len(), 1);
-        assert_eq!(page.search("i\u{307}x")[0].len(), 2);
-        assert!(page.search("absent").is_empty());
+        let search =
+            |query| crate::search::find_matches(&page, 0, query, Default::default(), || false);
+        assert_eq!(search("אב İX").len(), 1);
+        assert_eq!(search("i\u{307}x")[0].quads.len(), 2);
+        assert!(search("absent").is_empty());
         for bbox in [
             "NaN\t40\t90\t20",
             "20\t40\t0\t20",
@@ -842,7 +844,17 @@ pub(crate) mod tests {
             );
             document.set_recognized_text(0, text).unwrap();
             assert_eq!(document.text_revision(), 1);
-            assert_eq!(document.search_page(0, "AMBER FOX local").unwrap().len(), 1);
+            assert_eq!(
+                crate::search::find_matches(
+                    &document.structured_text(0).unwrap(),
+                    0,
+                    "AMBER FOX local",
+                    Default::default(),
+                    || false,
+                )
+                .len(),
+                1
+            );
             assert!(
                 document.structured_text(1).unwrap().chars.is_empty(),
                 "OCR is per-page, not document-wide"

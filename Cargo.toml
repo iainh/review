@@ -7,6 +7,7 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 anyhow = "1.0"
+caseless = "0.2"
 directories = "6"
 egui = "0.34.3"
 egui-wgpu = "0.34.3"

@@ -50,6 +50,7 @@ impl Viewer {
         let render_worker = RenderWorker::new(document.worker_source());
         let state_key = crate::persistence::file_key(document.path());
         let text_revision = document.text_revision();
+        let search = Search::new(&document);
         Self {
             document,
             state_key,
@@ -61,7 +62,7 @@ impl Viewer {
             page_texture: None,
             rendered: None,
             render_worker,
-            search: Search::default(),
+            search,
             reveal_match: false,
             sidebar,
             printing: PrintDialog::default(),
@@ -250,11 +251,6 @@ impl Viewer {
             self.text_revision = self.document.text_revision();
             self.selection.clear();
             self.reveal_match = false;
-            if !self.search.submitted.is_empty() {
-                self.search.start(&self.document);
-            } else {
-                self.search.clear_results();
-            }
         }
         let ctx = root.ctx().clone();
         let previous = (self.document.current_page(), self.zoom);
@@ -316,6 +312,7 @@ impl Viewer {
             self.search.clear_results();
             ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("search_query")));
         }
+        self.search.refresh_text(&self.document, &ctx);
         if shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F3)) {
             self.advance_match(true);
         } else if shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F3)) {
@@ -367,17 +364,6 @@ impl Viewer {
         let enter_backwards = ctx.input(|input| input.events.iter().any(|event| matches!(
             event, egui::Event::Key { key: Key::Enter, pressed: true, modifiers, .. } if modifiers.shift
         )));
-        match self.search.step(&self.document) {
-            Ok(Some(page)) => {
-                self.go_to_page(page);
-                self.reveal_match = true;
-            }
-            Err(error) => self.error = Some(format!("Search failed: {error:#}")),
-            _ => {}
-        }
-        if self.search.next_page.is_some() {
-            ctx.request_repaint();
-        }
 
         egui::Panel::top("toolbar").show_inside(root, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -579,6 +565,7 @@ impl Viewer {
 
         if self.search.open {
             egui::Panel::top("search_bar").show_inside(root, |ui| {
+                let mut reveal_result = false;
                 ui.horizontal_wrapped(|ui| {
                     let search_label = ui.label("Find");
                     let field = ui
@@ -595,18 +582,33 @@ impl Viewer {
                     if focus_search {
                         select_text(&ctx, &field, self.search.query.chars().count());
                     }
+                    let changed = ui
+                        .checkbox(&mut self.search.options.case_sensitive, "Case sensitive")
+                        .changed()
+                        | ui.checkbox(&mut self.search.options.whole_word, "Whole words")
+                            .changed();
+                    if changed && !self.search.submitted.is_empty() {
+                        self.search.start(&self.document, &ctx);
+                    }
+                    // Apply edits/cancellation before polling, so an old page
+                    // cannot auto-navigate in the frame that replaces a query.
+                    let selected = self.search.selected;
+                    if let Some(page) = self.search.poll() {
+                        self.go_to_page(page);
+                        self.reveal_match = true;
+                    }
+                    reveal_result = selected != self.search.selected;
                     let enter =
                         field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
                     if ui.button("Find").clicked() || (enter && self.search.submitted.is_empty()) {
-                        self.search.start(&self.document);
-                        ctx.request_repaint();
+                        self.search.start(&self.document, &ctx);
                     } else if enter {
                         self.advance_match(enter_backwards);
                     }
                     if enter {
                         field.request_focus();
                     }
-                    let ready = self.search.next_page.is_none() && !self.search.matches.is_empty();
+                    let ready = !self.search.matches.is_empty();
                     if ui
                         .add_enabled(ready, egui::Button::new("Previous match"))
                         .clicked()
@@ -619,13 +621,16 @@ impl Viewer {
                     {
                         self.advance_match(false);
                     }
-                    if let Some(page) = self.search.next_page {
+                    if self.search.scanning() {
+                        ui.spinner();
                         ui.label(format!(
-                            "Searching… {}/{}",
-                            page,
-                            self.document.page_count()
+                            "Searching… {}/{} pages · {} / {} matches so far",
+                            self.search.scanned,
+                            self.search.total,
+                            self.search.selected.map_or(0, |index| index + 1),
+                            self.search.matches.len()
                         ));
-                    } else if !self.search.submitted.is_empty() {
+                    } else if self.search.error.is_none() && !self.search.submitted.is_empty() {
                         if self.search.matches.is_empty() {
                             ui.label("No matches");
                         } else {
@@ -642,6 +647,64 @@ impl Viewer {
                         field.surrender_focus();
                     }
                 });
+                if let Some(error) = &self.search.error {
+                    ui.colored_label(Color32::LIGHT_RED, format!("Search failed: {error}"));
+                }
+                if !self.search.matches.is_empty() {
+                    let mut results = egui::ScrollArea::vertical()
+                        .id_salt("search_results")
+                        .max_height(112.0)
+                        .min_scrolled_height(112.0)
+                        .auto_shrink([false, true]);
+                    if (self.reveal_match || reveal_result)
+                        && let Some(index) = self.search.selected
+                    {
+                        results = results.vertical_scroll_offset(
+                            index as f32 * (22.0 + ui.spacing().item_spacing.y),
+                        );
+                    }
+                    results.show_rows(ui, 22.0, self.search.matches.len(), |ui, rows| {
+                        for index in rows {
+                            let hit = &self.search.matches[index];
+                            let mut label = egui::text::LayoutJob::default();
+                            let font = egui::TextStyle::Body.resolve(ui.style());
+                            let colour = ui.visuals().text_color();
+                            let normal = egui::TextFormat {
+                                font_id: font,
+                                color: colour,
+                                ..Default::default()
+                            };
+                            label.append(
+                                &format!("{}   ", self.document.page_description(hit.page)),
+                                0.0,
+                                normal.clone(),
+                            );
+                            label.append(&hit.snippet[..hit.emphasis.start], 0.0, normal.clone());
+                            let mut emphasized = normal.clone();
+                            emphasized.background =
+                                Color32::from_rgba_unmultiplied(255, 145, 0, 70);
+                            label.append(&hit.snippet[hit.emphasis.clone()], 0.0, emphasized);
+                            label.append(&hit.snippet[hit.emphasis.end..], 0.0, normal);
+                            if ui
+                                .add(
+                                    egui::Button::selectable(
+                                        self.search.selected == Some(index),
+                                        label,
+                                    )
+                                    .min_size(egui::vec2(0.0, 22.0))
+                                    .wrap_mode(egui::TextWrapMode::Truncate),
+                                )
+                                .on_hover_text(&hit.snippet)
+                                .clicked()
+                            {
+                                let page = hit.page;
+                                self.search.selected = Some(index);
+                                self.go_to_page(page);
+                                self.reveal_match = true;
+                            }
+                        }
+                    });
+                }
             });
         }
 
@@ -884,7 +947,7 @@ impl Viewer {
             self.rendered = None;
             self.page_texture = None;
             self.sidebar.clear_previews();
-            self.search.clear_results();
+            self.search.reload_document(&self.document, &ctx);
             self.selection.clear();
             self.page_text.invalidate();
             self.links_page = None;
@@ -952,7 +1015,9 @@ mod tests {
     }
 
     fn settled_frame(viewer: &mut Viewer, ctx: &egui::Context) -> egui::FullOutput {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Native worker/font startup competes with parallel tests on CI. This
+        // verifies the settled view, not a five-second rendering benchmark.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let output = frame(viewer, ctx, vec![]);
             let ready = viewer.rendered.is_some_and(|key| {
@@ -968,8 +1033,11 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "render did not settle: {:?}",
-                viewer.error
+                "render did not settle: error={:?}, rendered={:?}, zoom={}, restore={}",
+                viewer.error,
+                viewer.rendered,
+                viewer.effective_zoom,
+                viewer.restore_position
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -1484,11 +1552,24 @@ mod tests {
 
     #[test]
     fn shift_f3_uses_event_modifiers_after_shift_has_been_released() {
-        let mut viewer = Viewer::new(crate::document::tests::sample_document());
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            crate::document::tests::sample_pdf("BT /F1 16 Tf 40 350 Td (Alpha alpha) Tj ET", false),
+        )
+        .unwrap();
+        let mut viewer = Viewer::new(crate::document::PdfDocument::open(file.path()).unwrap());
+        let ctx = egui::Context::default();
         viewer.search.query = "alpha".into();
-        viewer.search.start(&viewer.document);
-        for _ in 0..2 {
-            viewer.search.step(&viewer.document).unwrap();
+        viewer.search.start(&viewer.document, &ctx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while viewer.search.scanning() {
+            viewer.search.poll();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "search did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -1505,7 +1586,7 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
             ..Default::default()
         };
-        let _ = egui::Context::default().run_ui(input, |ui| viewer.ui(ui, &mut false));
+        let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
         assert_eq!(viewer.search.selected, Some(2));
         assert_eq!(viewer.document.current_page(), 1);
     }
@@ -1517,12 +1598,11 @@ mod tests {
         std::fs::write(&path, crate::document::tests::sample_pdf("", false)).unwrap();
         let mut viewer = Viewer::new(crate::document::PdfDocument::open(&path).unwrap());
         viewer.search.query = "amber".into();
-        viewer.search.start(&viewer.document);
-        for _ in 0..2 {
-            viewer.search.step(&viewer.document).unwrap();
-        }
-        assert!(viewer.search.matches.is_empty());
+        viewer.search.open = true;
         let ctx = egui::Context::default();
+        viewer.search.start(&viewer.document, &ctx);
+        crate::search::tests::finish(&mut viewer.search);
+        assert!(viewer.search.matches.is_empty());
         let run = |viewer: &mut Viewer| {
             ctx.run_ui(
                 egui::RawInput {
@@ -1540,6 +1620,7 @@ mod tests {
             .set_recognized_text(0, crate::ocr::tests::word_text("amber fox"))
             .unwrap();
         run(&mut viewer);
+        crate::search::tests::finish(&mut viewer.search);
         run(&mut viewer);
         assert_eq!(viewer.search.matches.len(), 1);
         viewer
@@ -1548,6 +1629,7 @@ mod tests {
             .unwrap();
         run(&mut viewer);
         assert!(viewer.search.matches.is_empty());
+        crate::search::tests::finish(&mut viewer.search);
         run(&mut viewer);
         assert!(viewer.search.matches.is_empty());
         assert_eq!(viewer.text_revision, 2);
