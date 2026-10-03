@@ -8,7 +8,7 @@ use crate::document::{PageImage, PdfDocument, WorkerSource};
 const CACHE_BYTES: usize = 128 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 12;
 const TILE_ENTRIES: usize = 128;
-const TILE_SIDE: u32 = 1024;
+pub const TILE_SIDE: u32 = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RenderKey {
@@ -28,6 +28,16 @@ impl RenderKey {
 
     pub fn scale(self) -> f32 {
         f32::from_bits(self.scale)
+    }
+
+    pub fn image_size(self, size: (f32, f32)) -> [usize; 2] {
+        match self.region {
+            Some([x0, y0, x1, y1]) => [(x1 - x0) as usize, (y1 - y0) as usize],
+            None => [
+                (f64::from(size.0) * f64::from(self.scale())).ceil() as usize,
+                (f64::from(size.1) * f64::from(self.scale())).ceil() as usize,
+            ],
+        }
     }
 }
 
@@ -351,6 +361,8 @@ mod tests {
         assert_eq!(tiles.len(), 6);
         assert_eq!(tiles[0].key.region, Some([1023, 0, 2049, 1025]));
         assert_eq!(tiles[5].key.region, Some([3071, 1023, 3500, 2049]));
+        assert_eq!(tiles[0].key.image_size((3500.0, 2100.0)), [1026, 1025]);
+        assert_eq!(RenderKey::new(0, 1.5).image_size((10.5, 20.75)), [16, 32]);
         assert_eq!(tiles[0].bounds.min, egui::pos2(1024.0 / 3500.0, 0.0));
         assert_eq!(tiles[5].bounds.max, egui::pos2(1.0, 2048.0 / 2100.0));
         assert_eq!(tiles[0].bounds.max.x, tiles[1].bounds.min.x);
@@ -424,8 +436,7 @@ mod tests {
                 let start = ((y - y0) * image.width * 4) as usize;
                 let length = (image.width * 4) as usize;
                 assert!(
-                    &image.rgba[start..start + length]
-                        == &full.rgba[full_start..full_start + length],
+                    image.rgba[start..start + length] == full.rgba[full_start..full_start + length],
                     "tile {:?}, row {y}",
                     tile.key.region
                 );
@@ -462,6 +473,120 @@ mod tests {
         }));
         state.finish(wanted, Err("current".into()));
         assert!(state.cache.contains_key(&wanted));
+    }
+
+    #[test]
+    fn tile_sources_capture_edits_and_undo_without_mutating_old_snapshots() {
+        use crate::annotations::{Geometry, Kind};
+        let mut document = crate::document::tests::sample_document();
+        let key = RenderKey {
+            region: Some([29, 39, 181, 223]),
+            ..RenderKey::new(0, 2.0)
+        };
+        let before = render(&document, key, 2048).unwrap().rgba;
+        let original = document.worker_source();
+        document
+            .add_annotation(
+                0,
+                Kind::Ink,
+                Geometry::Ink(vec![vec![[0.1, 0.1], [0.3, 0.25]]]),
+                "tile ink",
+                [1.0, 0.0, 0.0],
+                3.0,
+            )
+            .unwrap();
+        let edited = render(&document, key, 2048).unwrap().rgba;
+        assert_ne!(edited, before);
+        let current = document.worker_source();
+        document.undo().unwrap();
+        let undone = document.worker_source();
+        std::thread::spawn(move || {
+            assert_eq!(
+                render(&original.open().unwrap(), key, 2048).unwrap().rgba,
+                before
+            );
+            assert_eq!(
+                render(&current.open().unwrap(), key, 2048).unwrap().rgba,
+                edited
+            );
+            assert_eq!(
+                render(&undone.open().unwrap(), key, 2048).unwrap().rgba,
+                before
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn cropbox_intrinsic_rotation_and_transparency_match_tile_pixels() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("geometry.pdf");
+        crate::document::tests::geometry_fixture(&path);
+        let document = PdfDocument::open(path).unwrap();
+        let full = document.render_at_scale(0, 2.0).unwrap();
+        let tile = document.render_region(0, 2.0, [39, 71, 221, 401]).unwrap();
+        assert_eq!((tile.width, tile.height), (182, 330));
+        for y in 0..330 {
+            let start = y * 182 * 4;
+            let full_start = ((y + 71) * 300 + 39) * 4;
+            assert!(
+                tile.rgba[start..start + 182 * 4] == full.rgba[full_start..full_start + 182 * 4],
+                "rotated alpha crop row {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn authenticated_worker_renders_tiles_and_replacement_has_independent_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("encrypted.pdf");
+        crate::document::tests::encrypted_fixture(
+            &path,
+            "open-secret",
+            mupdf::pdf::Permission::ACCESSIBILITY,
+            mupdf::pdf::Encryption::Aes256,
+        );
+        let document = PdfDocument::open_with_password(path, Some("open-secret"))
+            .unwrap()
+            .unwrap();
+        assert!(!document.permissions().copy);
+        let mut worker = RenderWorker::new(document.worker_source());
+        let key = RenderKey {
+            region: Some([12, 32, 269, 377]),
+            ..RenderKey::new(0, 3.0)
+        };
+        let ctx = egui::Context::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let image = loop {
+            worker.begin_frame();
+            let image = worker.image(key, Priority::Page);
+            worker.end_frame(&ctx);
+            if let Some(image) = image {
+                break image.unwrap();
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!((image.width, image.height), (257, 345));
+        assert_eq!(
+            image.rgba,
+            document
+                .render_region(0, 3.0, [12, 32, 269, 377])
+                .unwrap()
+                .rgba
+        );
+        let shared = worker.shared.clone();
+        drop(worker);
+        assert!(shared.0.lock().unwrap().stopped);
+        assert!(
+            !RenderWorker::new(document.worker_source())
+                .shared
+                .0
+                .lock()
+                .unwrap()
+                .stopped
+        );
     }
 
     #[test]

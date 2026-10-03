@@ -1218,7 +1218,13 @@ pub(crate) mod tests {
         assert_eq!((image.width, image.height), (500, 800));
         assert_eq!(image.rgba.len(), 500 * 800 * 4);
         assert!(image.rgba.as_chunks::<4>().0.iter().any(|p| p[0] < 128));
-        assert_eq!(document.search_page(0, "Distant needle").unwrap().len(), 1);
+        assert!(
+            document
+                .structured_text(0)
+                .unwrap()
+                .plain_text()
+                .contains("Distant needle")
+        );
         assert_eq!(document.links(0).unwrap().len(), 1);
         for region in [[4, 5, 4, 10], [0, 0, 20_001, 2], [0, 0, u32::MAX, 5]] {
             assert!(document.render_region(0, 1.0, region).is_err());
