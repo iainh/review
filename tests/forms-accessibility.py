@@ -108,7 +108,7 @@ with subprocess.Popen(["wtype", "-s", "120000"]) as keyboard:
                         field = find("Full name · read-only", "entry")
                         assert not field.getState().contains(pyatspi.STATE_ENABLED)
                         capture("denied")
-                        key("w", "ctrl")
+                        key("q", "ctrl")
                         process.wait(timeout=10)
                         print("PASS: native permission-denied fields are disabled", flush=True)
                         continue
@@ -178,6 +178,9 @@ with subprocess.Popen(["wtype", "-s", "120000"]) as keyboard:
                     key("s", "ctrl")
                     wait(lambda: any(node.name.startswith(f"Review — {filename}.pdf —") for app in pyatspi.Registry.getDesktop(0) for node in walk(app)), "clean saved title")
                     key("w", "ctrl")
+                    wait(lambda: named("Page", "entry") is None, "closed last document")
+                    assert process.poll() is None
+                    key("q", "ctrl")
                     process.wait(timeout=10)
                     assert process.returncode == 0
                     print(f"PASS: {filename} native keyboard fields, buttons, choices, read-only, dirty-close and saved title", flush=True)

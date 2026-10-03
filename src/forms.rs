@@ -423,6 +423,7 @@ impl PdfDocument {
 #[derive(Default)]
 pub struct Forms {
     pub open: bool,
+    pub fields_id: Option<egui::Id>,
     page: Option<usize>,
     fields: Vec<Field>,
     focus: Option<i32>,
@@ -442,6 +443,7 @@ impl Forms {
     }
 
     pub fn focus_ids(&self) -> impl Iterator<Item = egui::Id> + '_ {
+        let prefix = self.fields_id.unwrap_or_else(|| egui::Id::new("form"));
         self.fields
             .iter()
             .filter(|f| {
@@ -450,7 +452,7 @@ impl Forms {
                     && (f.kind == Kind::Text
                         || (f.kind == Kind::Combo && f.flags.contains(FieldFlags::EDIT)))
             })
-            .map(|f| egui::Id::new(("form", f.xref)))
+            .map(move |f| prefix.with(f.xref))
     }
 
     pub fn panel(
@@ -464,6 +466,7 @@ impl Forms {
         }
         self.refresh(document)?;
         let ctx = root.ctx().clone();
+        let prefix = self.fields_id.unwrap_or_else(|| egui::Id::new("form"));
         let restricted_copy = !document.permissions().copy
             && self
                 .focus_ids()
@@ -492,7 +495,7 @@ impl Forms {
                     ui.push_id(field.xref, |ui| {
                         let label = ui.label(format!("{}{}{}", field.label, if field.flags.contains(FieldFlags::REQUIRED) { " · required" } else { "" }, if field.editable { "" } else { " · read-only" }));
                         ui.add_enabled_ui(field.editable, |ui| {
-                            let id = egui::Id::new(("form", field.xref));
+                            let id = prefix.with(field.xref);
                             let response = match field.kind {
                                 Kind::Text => {
                                     let edit = if field.flags.contains(FieldFlags::MULTILINE) { egui::TextEdit::multiline(&mut field.value).desired_rows(3) } else { egui::TextEdit::singleline(&mut field.value) };

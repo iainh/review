@@ -364,6 +364,7 @@ impl Viewer {
         let search_query_id = self.field_id("search_query");
         let page_text_id = self.field_id("page_text");
         self.page_text.field_id = Some(page_text_id);
+        self.forms.fields_id = Some(self.field_id("forms"));
         self.render_worker.begin_frame();
         self.ocr.poll(&self.document);
         if self.text_revision != self.document.text_revision() {
@@ -1265,6 +1266,78 @@ mod tests {
                 .contents,
             "keep this"
         );
+    }
+
+    #[test]
+    fn tab_form_fields_with_equal_pdf_xrefs_keep_values_and_undo_separate() {
+        use egui::{Key, Modifiers};
+        let mut first = Viewer::new(crate::forms::tests::document());
+        let mut second = Viewer::new(crate::forms::tests::document());
+        first.forms.open = true;
+        second.forms.open = true;
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        let mut draw = |viewer: &mut Viewer, tab, events| {
+            time += 1.0;
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 900.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.push_id(("document", tab), |ui| viewer.ui(ui, &mut false));
+                },
+            );
+        };
+        let value = |viewer: &Viewer| {
+            viewer
+                .document
+                .form_fields(0)
+                .unwrap()
+                .into_iter()
+                .find(|f| f.xref == 10)
+                .unwrap()
+                .value
+        };
+        draw(&mut first, 1u64, vec![]);
+        let first_id = first.forms.focus_ids().next().unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(first_id));
+        draw(&mut first, 1u64, vec![]);
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            modifiers: Modifiers::COMMAND,
+            pressed: true,
+            repeat: false,
+        };
+        draw(
+            &mut first,
+            1u64,
+            vec![key(Key::A), egui::Event::Text("First".into())],
+        );
+        assert_eq!(value(&first), "First");
+        draw(&mut second, 2u64, vec![]);
+        let second_id = second.forms.focus_ids().next().unwrap();
+        assert_ne!(first_id, second_id);
+        ctx.memory_mut(|memory| memory.request_focus(second_id));
+        draw(&mut second, 2u64, vec![]);
+        draw(
+            &mut second,
+            2u64,
+            vec![key(Key::A), egui::Event::Text("Second".into())],
+        );
+        assert_eq!(value(&second), "Second");
+        assert_eq!(value(&first), "First");
+        draw(&mut second, 2u64, vec![]);
+        draw(&mut second, 2u64, vec![key(Key::Z)]);
+        assert_eq!(value(&second), "Original");
+        assert_eq!(value(&first), "First");
+        assert!(first.is_dirty());
     }
 
     #[test]
@@ -2314,7 +2387,8 @@ mod tests {
         viewer.forms.open = true;
         let ctx = egui::Context::default();
         frame(&mut viewer, &ctx, Vec::new());
-        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(("form", 10))));
+        let field_id = viewer.field_id("forms").with(10);
+        ctx.memory_mut(|memory| memory.request_focus(field_id));
         frame(&mut viewer, &ctx, Vec::new());
         viewer.search.open = true;
         viewer.search.query = "remote".into();
@@ -2336,9 +2410,6 @@ mod tests {
         assert_eq!(viewer.search.matches.len(), 1);
         assert_eq!(viewer.search.matches[0].page, 1);
         assert_eq!(viewer.document.current_page(), 0);
-        assert_eq!(
-            ctx.memory(|memory| memory.focused()),
-            Some(egui::Id::new(("form", 10)))
-        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(field_id));
     }
 }
