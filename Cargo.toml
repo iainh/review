@@ -10,6 +10,7 @@ anyhow = "1.0"
 caseless = "0.2"
 directories = "6"
 egui = "0.34.3"
+egui-desktop = { path = "vendor/egui-desktop" }
 egui-wgpu = "0.34.3"
 egui-winit = { version = "0.34.3", default-features = false, features = ["accesskit", "clipboard", "wayland", "x11"] }
 mupdf = { version = "0.8", default-features = false, features = ["base14-fonts", "system-fonts"] }

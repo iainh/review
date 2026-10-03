@@ -32,3 +32,43 @@ their manifest entries are removed. Review's document tests cover encrypted
 user and owner authentication, print quality, copying and empty passwords.
 Remove the patch and vendored library when an upstream release fixes this
 conversion; keep those regression tests.
+
+# egui-desktop compatibility adaptation
+
+`egui-desktop/` contains the MIT-licensed library source, README and licence
+from the published `egui-desktop` 0.2.5 crate, upstream
+<https://github.com/PxlSyl/egui-desktop/tree/v0.2.5>.
+Original crate SHA-256:
+`340fa91344f2f378f3f3e4996d459594a6a6f9b1281cb232c320a94aa5c40a43`.
+
+The published manifest requires egui/eframe 0.33.3. Its context and widget
+types cannot interoperate with Review's egui 0.34.3. This local dependency
+uses egui 0.34.3 without downgrading Review or changing winit/wgpu. The
+eframe-only rounded-corner and OS interop modules, examples and unrelated
+image loaders are omitted. Optional image icons remain supported by egui;
+Review uses a text brand instead of the upstream default app icon.
+
+Library adaptations:
+
+- Render titlebars with egui 0.34's `Panel::show_inside` on the root `Ui`.
+  Update renamed methods and explicit `f32` stroke widths.
+- Keep shortcut hints, but do not automatically run shortcut callbacks while
+  drawing. Review owns dispatch, focused-field gates and modal protection.
+- Activate menu navigation with Ctrl+F2, not a held Alt modifier, preserving
+  Alt+Left/Right document history and text editing.
+- Label custom-painted menus and window controls for AccessKit. Pass macOS
+  control labels independently of whether their hover glyph is visible.
+- Disable both unavailable submenu interactions and their accessible nodes.
+- Display the host command modifier as Ctrl on Linux/Windows, Cmd on macOS.
+- Keep resize-handle areas immovable so only the native window owns resizing.
+- Apply rustfmt to the vendored Rust source.
+
+Review derives shell colours from its existing egui visuals, including native
+system-theme changes and high contrast. It handles the package's window
+commands through egui-winit, while titlebar Close goes through App's normal
+dirty-document confirmation. Native pointer grabs can consume the mouse release;
+the renderer ends egui's gesture and queues its release when handing off a move
+or resize. The Wayland test asserts move followed by resize changes geometry.
+No raw window pointers or title-based native window lookup are added. Remove
+this adaptation when upstream supports the current egui generation and
+host-managed shortcuts/root-Ui rendering.

@@ -962,6 +962,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-desktop"
+version = "0.2.5"
+dependencies = [
+ "egui",
+ "lazy_static",
+]
+
+[[package]]
 name = "egui-wgpu"
 version = "0.34.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2892,6 +2900,7 @@ dependencies = [
  "caseless",
  "directories",
  "egui",
+ "egui-desktop",
  "egui-wgpu",
  "egui-winit",
  "libloading",
