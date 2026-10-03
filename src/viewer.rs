@@ -3,6 +3,7 @@ use egui::{Color32, Context, Key, Modifiers};
 use crate::{
     annotations::{AnnotationUi, Kind},
     document::PdfDocument,
+    forms::Forms,
     inspector::Inspector,
     layout::LayoutMode,
     links::LinkTarget,
@@ -43,6 +44,7 @@ pub struct Viewer {
     ocr: Ocr,
     text_revision: u64,
     annotations: AnnotationUi,
+    forms: Forms,
     pub save_requested: Option<bool>,
 }
 
@@ -83,6 +85,7 @@ impl Viewer {
             ocr: Ocr::default(),
             text_revision,
             annotations: AnnotationUi::default(),
+            forms: Forms::default(),
             save_requested: None,
         }
     }
@@ -156,6 +159,7 @@ impl Viewer {
         self.search.reload_document(&self.document, ctx);
         self.page_text.invalidate();
         self.annotations.invalidate();
+        self.forms.invalidate();
     }
 
     fn edited(&mut self, result: anyhow::Result<()>, ctx: &Context) {
@@ -165,7 +169,7 @@ impl Viewer {
                 self.invalidate_document(ctx);
                 self.error = None;
             }
-            Err(error) => self.error = Some(format!("Annotation change failed: {error:#}")),
+            Err(error) => self.error = Some(format!("Document change failed: {error:#}")),
         }
     }
 
@@ -450,6 +454,7 @@ impl Viewer {
                 if self.page_text.open {
                     fields.push(egui::Id::new("page_text"));
                 }
+                fields.extend(self.forms.focus_ids());
                 let focused = ctx.memory(|memory| memory.focused());
                 let next = match fields.iter().position(|id| Some(*id) == focused) {
                     Some(index) if backwards => (index + fields.len() - 1) % fields.len(),
@@ -664,6 +669,7 @@ impl Viewer {
                 if ui.selectable_label(self.annotations.open, "Annotations").clicked() {
                     self.annotations.open = !self.annotations.open;
                     self.annotations.tool = None;
+                    self.forms.open = false;
                 }
                 let quads = self.selection.quads(self.document.current_page());
                 for kind in [Kind::Highlight, Kind::Underline, Kind::StrikeOut] {
@@ -675,6 +681,12 @@ impl Viewer {
                 }
                 if ui.add_enabled(self.document.can_undo(), egui::Button::new("Undo")).clicked() { self.inspector.invalidate(); let result = self.document.undo(); self.edited(result, &ctx); }
                 if ui.add_enabled(self.document.can_redo(), egui::Button::new("Redo")).clicked() { self.inspector.invalidate(); let result = self.document.redo(); self.edited(result, &ctx); }
+                if ui.selectable_label(self.forms.open, "Forms").clicked() {
+                    self.forms.open = !self.forms.open;
+                    self.annotations.open = false;
+                    self.annotations.tool = None;
+                    self.annotations.invalidate();
+                }
                 if self.document.is_dirty() { ui.label("Unsaved changes"); }
             });
             ui.horizontal_wrapped(|ui| {
@@ -749,7 +761,12 @@ impl Viewer {
                     // Apply edits/cancellation before polling, so an old page
                     // cannot auto-navigate in the frame that replaces a query.
                     let selected = self.search.selected;
-                    if let Some(page) = self.search.poll() {
+                    if let Some(page) = self.search.poll()
+                        && !self
+                            .forms
+                            .focus_ids()
+                            .any(|id| ctx.memory(|memory| memory.focused() == Some(id)))
+                    {
                         self.go_to_page(page);
                         self.reveal_match = true;
                     }
@@ -948,6 +965,14 @@ impl Viewer {
             Err(error) => self.edited(Err(error), &ctx),
             _ => {}
         }
+        match self
+            .forms
+            .panel(root, &mut self.document, || self.inspector.invalidate())
+        {
+            Ok(true) => self.edited(Ok(()), &ctx),
+            Err(error) => self.edited(Err(error), &ctx),
+            _ => {}
+        }
         let mut page_edited = false;
         egui::CentralPanel::default().show_inside(root, |ui| {
             if !shortcuts {
@@ -1009,6 +1034,22 @@ impl Viewer {
                     Ok(changed) => page_edited |= changed,
                     Err(error) => self.error = Some(format!("Annotation change failed: {error:#}")),
                 }
+                if self.annotations.tool.is_none() {
+                    match self.forms.page_ui(
+                        &mut overlay,
+                        &mut self.document,
+                        &self.reading.screen_pages,
+                    ) {
+                        Ok(true) => {
+                            self.annotations.open = false;
+                            self.annotations.invalidate();
+                        }
+                        Err(error) => {
+                            self.error = Some(format!("Cannot read form fields: {error:#}"))
+                        }
+                        _ => {}
+                    }
+                }
             }
         });
         if shortcuts && self.inspector.ui(&ctx, &mut self.document) {
@@ -1019,6 +1060,7 @@ impl Viewer {
             self.selection.clear();
             self.page_text.invalidate();
             self.annotations.invalidate();
+            self.forms.invalidate();
             ctx.request_repaint();
         }
         if page_edited {
@@ -2051,5 +2093,49 @@ mod tests {
         for input in ["0", "3", "-1", "1.5", "abc", "", "999999999999999999999999"] {
             assert!(document.resolve_page(input).is_err(), "{input}");
         }
+    }
+
+    #[test]
+    fn refreshing_search_does_not_navigate_away_from_a_focused_form_entry() {
+        let mut document = crate::forms::tests::document();
+        document
+            .edit(|pdf| {
+                let buffer =
+                    mupdf::Buffer::from_bytes(b"BT /F1 12 Tf 40 350 Td (remote target) Tj ET")?;
+                let stream = pdf.add_stream(&buffer, None, false)?;
+                pdf.find_page(1)?.dict_put("Contents", stream)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut viewer = Viewer::new(document);
+        viewer.forms.open = true;
+        let ctx = egui::Context::default();
+        frame(&mut viewer, &ctx, Vec::new());
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(("form", 10))));
+        frame(&mut viewer, &ctx, Vec::new());
+        viewer.search.open = true;
+        viewer.search.query = "remote".into();
+        viewer.search.start(&viewer.document, &ctx);
+        let result =
+            viewer
+                .document
+                .set_form_value(0, 10, crate::forms::Value::Text("Typed".into()));
+        viewer.edited(result, &ctx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while viewer.search.scanning() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "search did not finish"
+            );
+            frame(&mut viewer, &ctx, Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(viewer.search.matches.len(), 1);
+        assert_eq!(viewer.search.matches[0].page, 1);
+        assert_eq!(viewer.document.current_page(), 0);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new(("form", 10)))
+        );
     }
 }

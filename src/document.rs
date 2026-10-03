@@ -49,6 +49,7 @@ pub struct PdfPermissions {
     pub print_high_quality: bool,
     pub copy: bool,
     pub annotate: bool,
+    pub fill_forms: bool,
 }
 
 /// Only owned Rust data crosses threads. Open this source on the worker so
@@ -161,6 +162,7 @@ impl PdfDocument {
                 && permissions.contains(Permission::PRINT_HQ),
             copy: permissions.contains(Permission::COPY),
             annotate: permissions.contains(Permission::ANNOTATE),
+            fill_forms: permissions.intersects(Permission::FORM | Permission::ANNOTATE),
         }
     }
 
@@ -716,6 +718,7 @@ pub(crate) mod tests {
                     print_high_quality: false,
                     copy: false,
                     annotate: false,
+                    fill_forms: false,
                 }
             );
             assert_eq!(document.page_count(), 2);
@@ -735,6 +738,7 @@ pub(crate) mod tests {
                     print_high_quality: true,
                     copy: true,
                     annotate: true,
+                    fill_forms: true,
                 }
             );
         }
@@ -758,6 +762,7 @@ pub(crate) mod tests {
                 print_high_quality: false,
                 copy: false,
                 annotate: false,
+                fill_forms: false,
             }
         );
         assert!(document.session_password.is_none());
@@ -775,6 +780,7 @@ pub(crate) mod tests {
                 print_high_quality: false,
                 copy: true,
                 annotate: false,
+                fill_forms: false,
             }
         );
         assert_eq!(
@@ -784,6 +790,7 @@ pub(crate) mod tests {
                 print_high_quality: true,
                 copy: true,
                 annotate: true,
+                fill_forms: true,
             }
         );
     }

@@ -168,7 +168,7 @@ impl NativeUi {
                     ("F9".into(), "Show / hide sidebar"),
                     (format!("{primary}+A / {primary}+C"), "Select all page text / copy selection"),
                     (format!("{primary}+Shift+T"), "Show / hide current page text"),
-                    ("F6 / Shift+F6".into(), "Cycle page, zoom, search and page-text fields"),
+                    ("F6 / Shift+F6".into(), "Cycle page, zoom, search, page-text and form text fields"),
                     ("Tab / Shift+Tab".into(), "Next / previous control"),
                     ("Enter / Space".into(), "Activate focused button"),
                     ("Escape".into(), "Dismiss UI, clear selection or leave fullscreen; never quit"),

@@ -185,6 +185,34 @@ the current document, including unsaved annotations.
 This is annotation editing, not page-content editing, redaction or signature
 creation. Review does not execute PDF JavaScript or submit PDF data to services.
 
+### Fill existing forms
+
+Use **Forms** to open the current page's fields, or click a field on any visible
+page, including rotated or facing pages. The panel supports single-line and
+multiline text, checkboxes, radio groups, combo boxes (including editable
+choices), and single/multiple-selection lists. Changes enter the live PDF
+immediately and use the same undo/redo, Save/Save As and unsaved-change protection
+as annotations. Radio groups stay synchronized across pages. Choice labels are
+displayed; their export values and exact option indices are saved, including
+duplicate exports.
+
+Use **Tab**/**Shift+Tab** to move through controls and **Space** to select buttons
+or list choices. **F6**/**Shift+F6** also includes editable form text fields.
+Page-navigation keys do not turn pages while a field owns keyboard focus.
+Inherited read-only flags, locked widgets and text-length limits are enforced.
+Filling requires form-filling or annotation permission, independently of copy
+permission. Copy and Cut remain blocked when the PDF denies copying.
+
+Review never runs PDF JavaScript, calculations, validation scripts or widget
+actions, and never submits form data. Push buttons, signatures, XFA forms,
+file-selection fields and password entry remain read-only. MuPDF can render
+password values as plain text, so Review does not allow entering them. Rich-text
+fields are edited as plain text. Form contents are not stored in reading/session
+metadata. MuPDF can draw combo export codes instead of display labels and does
+not highlight selected list-box rows in PDF appearances; the panel displays the
+labels and saved selection state. Unicode values are preserved, but egui's
+bundled fonts may lack glyphs for some labels.
+
 ## Printing
 
 Use **Print…** or **Ctrl+P** (**Cmd+P** on macOS). Choose **Fit** to scale each
@@ -522,8 +550,14 @@ binary, exported fixture directory and compiled `wayland-pointer.c` helper as
 arguments; an optional fourth argument saves screenshots. It uses isolated
 reading state and never activates an external link.
 
-This is a foundation, not a complete viewer. Form filling and tabs are not
-implemented yet.
+`bash tests/wayland-forms.sh` drives native AT-SPI controls and keyboard focus
+for text, checkbox, radio, combo and list values; checks inherited read-only and
+fill-only/copy-denied permissions; and reopens saved PDFs to verify values and
+encryption. It also clicks and edits a field on rotated facing page 2, checks
+cross-page radio state and document undo/redo, and verifies those saved values.
+Set `REVIEW_SCREENSHOTS` to capture representative form and unsaved-close states.
+
+This is a foundation, not a complete viewer. Tabs are not implemented yet.
 
 ## CI and releases
 

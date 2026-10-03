@@ -2,6 +2,7 @@
 
 mod annotations;
 mod document;
+mod forms;
 mod inspection;
 mod inspector;
 mod layout;
