@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Review
+Comment=Read PDF documents
+Exec=review -- %f
+Icon=application-pdf
+Terminal=false
+Categories=Graphics;Viewer;
+MimeType=application/pdf;
+StartupNotify=true
+StartupWMClass=review

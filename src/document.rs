@@ -27,8 +27,23 @@ pub struct PdfDocument {
 impl PdfDocument {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let document = Document::open(path.as_path())
+        #[cfg(windows)]
+        let mupdf_path = path.to_str().context("PDF path is not valid UTF-8")?;
+        #[cfg(not(windows))]
+        let mupdf_path = path.as_path();
+        let document = Document::open(mupdf_path)
             .with_context(|| format!("failed to open PDF at {}", path.display()))?;
+        ensure!(
+            document.is_pdf(),
+            "{} is not a PDF document",
+            path.display()
+        );
+        ensure!(
+            !document
+                .needs_password()
+                .context("failed to read PDF encryption")?,
+            "Password-protected PDFs are not supported"
+        );
         let page_count = usize::try_from(
             document
                 .page_count()
@@ -43,6 +58,10 @@ impl PdfDocument {
             page_count,
             current_page: 0,
         })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn name(&self) -> String {
@@ -183,6 +202,31 @@ fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
 pub(crate) mod tests {
     use super::{PdfDocument, fit_scale, rgb_to_rgba};
 
+    #[test]
+    fn opens_pdf_with_spaces_and_unicode_in_filename() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("résumé 日本語 document.pdf");
+        std::fs::write(&path, sample_pdf("", false)).unwrap();
+        let document = PdfDocument::open(&path).unwrap();
+        assert_eq!(document.path(), path);
+        assert_eq!(document.name(), "résumé 日本語 document.pdf");
+        assert_eq!(document.page_count(), 2);
+        assert_eq!(document.current_page(), 0);
+        assert!(document.render_page(1, (244, 244), 1.0).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opens_pdf_with_non_utf8_filename() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(OsStr::from_bytes(b"review-\xff.pdf"));
+        std::fs::write(&path, sample_pdf("", false)).unwrap();
+        let document = PdfDocument::open(&path).unwrap();
+        assert_eq!(document.path(), path);
+        assert_eq!(document.page_count(), 2);
+    }
+
     pub fn sample_document() -> PdfDocument {
         let text =
             "BT /F1 16 Tf 40 350 Td (Alpha alpha) Tj 0 -24 Td (Needle) Tj 0 -24 Td (phrase) Tj ET";
@@ -199,7 +243,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn sample_pdf(text: &str, outline: bool) -> Vec<u8> {
+    pub(crate) fn sample_pdf(text: &str, outline: bool) -> Vec<u8> {
         let last = "BT /F1 16 Tf 30 120 Td (Last alpha) Tj ET";
         let mut objects = vec![
             format!("<< /Type /Catalog /Pages 2 0 R {} >>", if outline { "/Outlines 8 0 R" } else { "" }),

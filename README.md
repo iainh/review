@@ -13,6 +13,16 @@ libclang, then run:
 cargo run --release -- document.pdf
 ```
 
+Launch without a path to open an empty window. Use **Open** or **Ctrl+O**
+(**Cmd+O** on macOS) to choose a PDF in the native file dialog, or drop a PDF
+onto the window. Opening another PDF replaces the current document and resets
+navigation, zoom, search and previews. Cancelling the dialog or failing to open
+a file leaves the current PDF unchanged; errors appear in the window.
+Password-protected PDFs are not supported.
+
+`review --help` prints usage without opening a window. Use `review -- -draft.pdf`
+for a filename that starts with a dash. Review displays one PDF at a time.
+
 Use **Left**/**Page Up** and **Right**/**Page Down** to change pages, **+** and
 **-** to zoom, **0** to fit the page, and **Q** or **Escape** to quit when not
 editing a field. Zoomed pages can be scrolled horizontally and vertically.
@@ -41,8 +51,9 @@ x86-64 tarball, separate macOS disk images for Apple Silicon and Intel, and a
 Windows x86-64 zip. Each package contains the executable, this README and the
 licence. `SHA256SUMS` contains checksums for all packages.
 
-Extract the tarball or zip, or mount the disk image and copy its contents to a
-local directory. Start the viewer from a terminal with a PDF path:
+Extract the tarball or zip to a permanent local directory. On macOS, mount the
+disk image and drag `Review.app` to Applications, then launch it from Finder.
+On Linux and Windows, launch `review` or `review.exe`, or pass a PDF path:
 
 ```sh
 ./review /path/to/document.pdf
@@ -52,8 +63,70 @@ On Windows, use `.\review.exe C:\path\to\document.pdf`. The Linux build targets
 Ubuntu 22.04 or newer and requires Fontconfig, X11/Wayland libraries and a
 working graphics driver. The macOS and Windows builds are not developer-signed
 or notarized; your operating system may require approval before running them.
-The macOS disk image contains a command-line executable, not a Finder-launchable
-`.app` bundle.
+
+## PDF associations
+
+Registration adds Review to **Open with** without changing your default PDF
+viewer. Keep the executable at the registered path; rerun registration if you
+move it. Linux and Windows scripts register only for the current user and do
+not need administrator privileges.
+
+### Linux
+
+From the extracted package, run:
+
+```sh
+bash install-desktop.sh
+```
+
+From a source checkout, run this after building:
+
+```sh
+bash platform/linux/install-desktop.sh "$PWD/target/release/review"
+```
+
+This installs `review.desktop` under `$XDG_DATA_HOME/applications` (normally
+`~/.local/share/applications`).
+Choose Review in your file manager's **Open with** menu. To make it the default:
+
+```sh
+xdg-mime default review.desktop application/pdf
+```
+
+Run `bash uninstall-desktop.sh` to remove registration. If Review was your
+default, choose another viewer before uninstalling. Native file dialogs require
+a running XDG Desktop Portal with a GTK, GNOME or KDE file-chooser backend, or
+Zenity as a fallback. A wlroots-only portal does not provide a file chooser.
+
+### macOS
+
+After copying `Review.app` to Applications, use Finder's **Open With > Review**.
+To make it the default, select a PDF, open **Get Info**, choose Review under
+**Open with**, then click **Change All**. Finder can send a PDF to an already
+running Review window; it replaces the current document. For multiple files,
+the last file is displayed. Remove the app to unregister it; choose another
+default viewer first if needed.
+
+### Windows
+
+From PowerShell in the extracted package, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-FileAssociation.ps1
+```
+
+This registers Review in **Open with** and **Settings > Apps > Default apps**.
+Choose Review there to make it your default for `.pdf`; the script does not
+modify Windows' protected `UserChoice` setting. From a source checkout, pass
+`-Executable C:\path\to\review.exe` to `platform\windows\Install-FileAssociation.ps1`.
+
+To remove registration, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Uninstall-FileAssociation.ps1
+```
+
+If Review was your default, choose another PDF viewer before uninstalling.
 
 ## Design
 
@@ -67,6 +140,13 @@ The macOS disk image contains a command-line executable, not a Finder-launchable
 ## Testing
 
 Run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
+`bash tests/linux-desktop.sh` checks Linux registration, path escaping and
+removal in a disposable XDG home; it requires `gio` and optionally uses
+`desktop-file-validate`. `bash tests/wayland-open.sh` checks native file dialogs,
+cancellation, error recovery and replacement using a synthetic PDF in the Sway
+session described below. It requires a GTK file-chooser portal or Zenity and
+`python3-pyatspi` to activate native chooser controls through accessibility.
+
 `bash tests/wayland.sh` exercises native keyboard and pointer input under Sway
 using the OpenID Connect handbook. It requires `swaymsg`, `wtype`, `grim`,
 `jq`, `curl`, a C compiler, `pkg-config`, and Wayland development headers and

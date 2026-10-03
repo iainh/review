@@ -42,6 +42,10 @@ impl Viewer {
         )
     }
 
+    pub fn path(&self) -> &std::path::Path {
+        self.document.path()
+    }
+
     fn go_to_page(&mut self, page: usize) {
         self.document.go_to_page(page);
         self.page_input = (self.document.current_page() + 1).to_string();
@@ -72,7 +76,7 @@ impl Viewer {
         }
     }
 
-    pub fn ui(&mut self, root: &mut egui::Ui) {
+    pub fn ui(&mut self, root: &mut egui::Ui, open_requested: &mut bool) {
         let ctx = root.ctx().clone();
         let focus_page = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::G));
         if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F9)) {
@@ -178,6 +182,10 @@ impl Viewer {
                 {
                     self.search.open = true;
                     focus_search = true;
+                }
+                ui.separator();
+                if ui.button("Open…").on_hover_text("Ctrl+O / Cmd+O").clicked() {
+                    *open_requested = true;
                 }
             });
             if let Some(error) = &self.error {
@@ -415,7 +423,7 @@ mod tests {
                 events: vec![event],
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| viewer.ui(ui));
+            let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
             assert!(!viewer.quit);
             assert_eq!(viewer.page_input, expected);
             assert_eq!(viewer.document.current_page(), 0);
@@ -445,7 +453,7 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
             ..Default::default()
         };
-        let _ = egui::Context::default().run_ui(input, |ui| viewer.ui(ui));
+        let _ = egui::Context::default().run_ui(input, |ui| viewer.ui(ui, &mut false));
         assert_eq!(viewer.search.selected, Some(2));
         assert_eq!(viewer.document.current_page(), 1);
     }
