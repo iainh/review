@@ -46,7 +46,7 @@ int main(int argc, char **argv) {
         strcmp(argv[1], "triple") && strcmp(argv[1], "right") &&
         strcmp(argv[1], "right-click") && strcmp(argv[1], "move") &&
         strcmp(argv[1], "drag") && strcmp(argv[1], "scroll"))) {
-        fprintf(stderr, "usage: pointer click|double|triple|right|right-click x y | move x y [hold-ms] | drag x y x2 y2 | scroll x y delta\n");
+        fprintf(stderr, "usage: pointer click|double|triple|right|right-click x y | move x y [hold-ms] | drag x y x2 y2 [x3 y3] | scroll x y delta\n");
         return 1;
     }
     struct wl_display *display = wl_display_connect(NULL);
@@ -115,10 +115,17 @@ int main(int argc, char **argv) {
         zwlr_virtual_pointer_v1_button(pointer, now(), button, WL_POINTER_BUTTON_STATE_PRESSED);
         zwlr_virtual_pointer_v1_frame(pointer);
         settle(display);
-        if (!strcmp(argv[1], "drag") && argc == 6) {
+        if (!strcmp(argv[1], "drag") && (argc == 6 || argc == 8)) {
             zwlr_virtual_pointer_v1_motion_absolute(pointer, now(), atoi(argv[4]), atoi(argv[5]), 1280, 900);
             zwlr_virtual_pointer_v1_frame(pointer);
             settle(display);
+            if (argc == 8) {
+                // Native move/resize starts after crossing the drag threshold.
+                // Give the compositor a further motion after it takes over.
+                zwlr_virtual_pointer_v1_motion_absolute(pointer, now(), atoi(argv[6]), atoi(argv[7]), 1280, 900);
+                zwlr_virtual_pointer_v1_frame(pointer);
+                settle(display);
+            }
         }
         zwlr_virtual_pointer_v1_button(pointer, now(), button, WL_POINTER_BUTTON_STATE_RELEASED);
         zwlr_virtual_pointer_v1_frame(pointer);

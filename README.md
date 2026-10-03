@@ -257,14 +257,21 @@ hand the PDF to another application.
 
 ## Accessibility and appearance
 
+The desktop titlebar provides **File**, **View** and **Help** menus, native
+window controls, dragging and edge resizing. Document tabs sit below it,
+including when only one PDF is open. **File** uses the same Open, Save, Print
+and protected Close/Quit paths as the document controls. Unavailable actions
+are disabled. Menus adapt to narrow windows; **Ctrl+F2**, arrows and
+**Enter**/**Space** navigate them, and **Escape** dismisses them.
+
 **Tab** and **Shift+Tab** move between controls. **Enter** or **Space** activates
 a focused button. **F6**/**Shift+F6** cycles the page, zoom, search and page-text
 fields that are present. Document navigation keys do not take arrows away from
-focused controls. **F1** or **Shortcut help** opens keyboard help, focuses its
-close button and restores previous focus on dismissal. Ctrl/Cmd zoom shortcuts
-work while a field has focus.
+focused controls. **F1** or **Help → Keyboard shortcuts** opens keyboard help,
+focuses its close button and restores previous focus on dismissal. Ctrl/Cmd
+zoom shortcuts work while a field has focus.
 
-**Appearance** offers **System**, **Light**, **Dark** and **High contrast**.
+**View → Appearance** offers **System**, **Light**, **Dark** and **High contrast**.
 System follows the light/dark theme reported by the OS, falling back to egui's
 dark theme when unavailable. High contrast is an explicit black-and-white UI
 with yellow focus/selection borders; winit does not report OS high-contrast mode.
@@ -274,6 +281,14 @@ lifetime, including when opening another document, and are saved between session
 Review connects egui's AccessKit tree to the native winit accessibility adapter
 (Windows UI Automation, macOS accessibility and Linux AT-SPI). Controls expose
 names, values, selection and focus; native actions are forwarded to egui.
+The currently locked Linux adapter can report disabled buttons as enabled to
+AT-SPI; their actions remain disabled in Review. Native maximize/restore depends
+on compositor support; Sway does not acknowledge those requests.
+
+The shell uses a local adaptation of published `egui-desktop` 0.2.5 for egui
+0.34.3. Review retains its winit/wgpu renderer and does not use eframe or an
+older egui. Provenance and compatibility changes are documented in
+[`vendor/README.md`](vendor/README.md).
 
 **Accessible controls do not make a raster PDF accessible.** Open **Page text**
 or press **Ctrl+Shift+T** (**Cmd+Shift+T** on macOS) to read the current page's
@@ -489,6 +504,12 @@ focus, tab switching/closing, opt-in restart, encrypted lazy restoration and the
 16-document limit. It also checks failed-save retention, dirty tab closure and
 cancellation midway through the window-exit queue. It uses disposable PDF/state
 directories and the same native Sway and chooser workflow.
+`bash tests/wayland-desktop.sh` checks the shell's native menu actions and
+keyboard navigation, disabled actions, persisted themes, fullscreen, field/history
+shortcut gates, dirty close cancellation, saved form reopening, narrow help,
+titlebar dragging and edge resizing. It requires the same Sway, AT-SPI, GTK
+chooser and pointer tools. Maximize/restore is checked when the compositor
+acknowledges it; the unit tests check commands and real viewport-state labels.
 `bash tests/wayland-inspection.sh` checks label navigation, inspector tabs,
 rendered layer toggles and explicit attachment saving/cancellation using a
 synthetic PDF. It additionally requires ImageMagick for pixel checks.

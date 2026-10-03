@@ -88,7 +88,7 @@ launch outline.pdf
 expect_title 'Review — outline.pdf — 1/2 — Fit page'
 key Right
 wtype -s 150 -M ctrl -k l -m ctrl -s 150 '600' -s 150 -k Return -s 150
-"$scratch/pointer" click 79 99
+"$scratch/pointer" click 79 153
 "$scratch/pointer" drag 240 450 327 450
 "$scratch/pointer" scroll 800 450 317
 expect_title 'Review — outline.pdf — 2/2 — 600%'
@@ -104,10 +104,10 @@ capture independent-reading
 wtype -s 150 -M ctrl -M shift -k Tab -m shift -m ctrl -s 150
 expect_title 'Review — second résumé.pdf — 1/2 — 100%'
 expect_state '.sidebar.open == false'
-"$scratch/pointer" click 45 12
+"$scratch/pointer" click 45 66
 capture session-preference
 # Two recent rows, Clear history, then the opt-in checkbox.
-"$scratch/pointer" click 105 117
+"$scratch/pointer" click 105 171
 expect_state '.restore_session and (.session.files | length) == 2 and .session.active == 1'
 "$scratch/pointer" click 800 450
 quit
@@ -207,7 +207,9 @@ quit
 REVIEW_FIXTURE_DIR="$scratch" cargo test export_annotation_fixture -- --ignored
 cp "$scratch/annotations.pdf" "$scratch/second-annotations.pdf"
 edit_note() {
-    local offset=$1 text=$2
+    # The desktop titlebar (32) and always-visible document tab (22) precede
+    # the existing library/viewer controls for both one and several tabs.
+    local offset=54 text=$1
     "$scratch/pointer" click 48 "$((56 + offset))"
     "$scratch/pointer" click 1090 "$((205 + offset))"
     "$scratch/pointer" click 1140 "$((282 + offset))"
@@ -216,11 +218,11 @@ edit_note() {
 }
 launch annotations.pdf
 expect_title 'Review — annotations.pdf — 1/2 — Fit page'
-edit_note 0 'first unsaved tab'
+edit_note 'first unsaved tab'
 expect_title 'Review — annotations.pdf * — 1/2 — Fit page'
 choose second-annotations.pdf
 expect_title 'Review — second-annotations.pdf — 1/2 — Fit page'
-edit_note 22 'second unsaved tab'
+edit_note 'second unsaved tab'
 expect_title 'Review — second-annotations.pdf * — 1/2 — Fit page'
 capture dirty-two-documents
 command Tab
@@ -261,7 +263,7 @@ echo 'PASS: failed-save retention, save-and-close identity, final dirty exit and
 quit
 launch annotations.pdf
 expect_title 'Review — annotations.pdf — 1/2 — Fit page'
-"$scratch/pointer" click 48 56
+"$scratch/pointer" click 48 110
 capture dirty-saved-source
 quit
 REVIEW_FIXTURE_DIR="$scratch" cargo test verify_native_tab_close_output -- --ignored

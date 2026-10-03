@@ -77,6 +77,10 @@ key 1
 expect_zoom '100%'
 page_geometry
 capture initial
+# Exclude shell/toolbars whose history controls legitimately change state.
+# Use the native PDF bounds rather than a fixed pre-titlebar crop offset.
+page_top=$(jq -r '.[1] | ceil' "$scratch/page.json")
+page_crop="1240x$((890 - page_top))+10+$page_top"
 pointer double 740 267 # "crossing" straddles the 768-point / 1024-pixel tile edge.
 command c
 clipboard crossing
@@ -96,8 +100,8 @@ wtype -s 150 -M alt -k Left -m alt -s 150
 expect_zoom '100%'
 capture back
 # History must restore the same visible raster, not a stretched stale tile.
-magick "$scratch/initial.png" -crop 1240x790+10+65 +repage "$scratch/a.png"
-magick "$scratch/back.png" -crop 1240x790+10+65 +repage "$scratch/b.png"
+magick "$scratch/initial.png" -crop "$page_crop" +repage "$scratch/a.png"
+magick "$scratch/back.png" -crop "$page_crop" +repage "$scratch/b.png"
 magick compare -metric AE "$scratch/a.png" "$scratch/b.png" null: 2>"$scratch/difference"
 echo 'PASS: pan/link history restores exact visible pixels'
 zoom 1600

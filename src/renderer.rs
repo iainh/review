@@ -117,11 +117,9 @@ impl Renderer {
 
     pub fn take_input(&mut self) -> egui::RawInput {
         let mut input = self.input.take_egui_input(&self.window);
-        input
-            .viewports
-            .entry(egui::ViewportId::ROOT)
-            .or_default()
-            .fullscreen = Some(self.window.fullscreen().is_some());
+        let viewport = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+        viewport.fullscreen = Some(self.window.fullscreen().is_some());
+        viewport.maximized = Some(self.window.is_maximized());
         input
     }
 
@@ -152,12 +150,50 @@ impl Renderer {
 
     pub fn render(&mut self, mut output: egui::FullOutput) -> Result<()> {
         if let Some(viewport) = output.viewport_output.get(&egui::ViewportId::ROOT) {
-            for command in &viewport.commands {
-                if let egui::ViewportCommand::Fullscreen(enabled) = command {
-                    self.window.set_fullscreen(
-                        enabled.then_some(winit::window::Fullscreen::Borderless(None)),
-                    );
-                }
+            // Use egui-winit's native handling (including X11's drag focus
+            // guard). Close belongs to App's dirty-document protection, never
+            // to the renderer. Only accept commands this single-window shell
+            // emits; clipboard and surface lifecycles remain unchanged.
+            egui_winit::process_viewport_commands(
+                &self.context,
+                &mut egui::ViewportInfo::default(),
+                viewport
+                    .commands
+                    .iter()
+                    .filter(|command| {
+                        matches!(
+                            command,
+                            egui::ViewportCommand::Fullscreen(_)
+                                | egui::ViewportCommand::Maximized(_)
+                                | egui::ViewportCommand::Minimized(_)
+                                | egui::ViewportCommand::StartDrag
+                                | egui::ViewportCommand::BeginResize(_)
+                        )
+                    })
+                    .cloned(),
+                &self.window,
+                &mut Vec::new(),
+            );
+            if viewport.commands.iter().any(|command| {
+                matches!(
+                    command,
+                    egui::ViewportCommand::StartDrag | egui::ViewportCommand::BeginResize(_)
+                )
+            }) && let Some(pos) = self.context.input(|i| i.pointer.latest_pos())
+            {
+                // Native grabs can consume the button release (Wayland does).
+                // End our gesture too, or the next edge drag retains the old
+                // titlebar's widget ownership. stop_dragging alone leaves the
+                // pointer button down; process a release through normal input.
+                self.context.stop_dragging();
+                let input = self.input.egui_input_mut();
+                input.events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: input.modifiers,
+                });
+                self.window.request_redraw();
             }
         }
         output.platform_output.commands.retain(|command| {

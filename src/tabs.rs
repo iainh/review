@@ -207,8 +207,9 @@ impl Tabs {
                 }
             });
         }
-        // A single document keeps the compact viewer; keyboard close still works.
-        if self.entries.len() > 1 || (!has_viewer && !self.entries.is_empty()) {
+        // The client titlebar carries the app brand; keep document identity
+        // and its close action visible even with a single tab.
+        if !self.entries.is_empty() {
             let reveal = std::mem::take(&mut self.reveal_active);
             egui::Panel::top("document_tabs").show_inside(root, |ui| {
                 if !enabled {

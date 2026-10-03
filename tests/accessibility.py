@@ -159,14 +159,16 @@ with tempfile.TemporaryDirectory() as state_directory, \
 
         for choice, screenshot in [("Light", "light"), ("Dark", "dark"),
                                    ("High contrast", "high-contrast"), ("System", "system-restored")]:
-            click("Appearance", "combo box")
+            click("View", "push button")
+            click("Appearance", "push button")
             click(choice, "push button")
             capture(screenshot)
         key("F1")
         find("Close help", "push button")
         capture("help-restored")
         key("Escape")
-        click("Appearance", "combo box")
+        click("View", "push button")
+        click("Appearance", "push button")
         click("High contrast", "push button")
         key("q", "ctrl")
         process.wait(timeout=10)

@@ -20,23 +20,23 @@ pub fn title_bar_height() -> f32 {
 }
 
 impl TitleBar {
-    /// Display the title bar in the egui context
+    /// Display the title bar inside the frame's root egui Ui.
     ///
     /// This is the main method to render the title bar. It automatically
     /// chooses the appropriate rendering method based on the platform:
-    /// - macOS: Uses native traffic light buttons
+    /// - macOS: Uses macOS-style traffic light buttons
     /// - Windows/Linux: Uses generic window control buttons
     ///
     /// # Arguments
-    /// * `ctx` - The egui context
+    /// * `root` - The root Ui supplied by egui's `Context::run_ui`.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
-    ///     self.title_bar.show(ctx);
-    ///     
-    ///     CentralPanel::default().show(ctx, |ui| {
+    /// fn ui(&mut self, root: &mut egui::Ui) {
+    ///     self.title_bar.show(root);
+    ///
+    ///     egui::CentralPanel::default().show_inside(root, |ui| {
     ///         ui.label("Main content");
     ///     });
     /// }

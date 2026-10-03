@@ -200,6 +200,18 @@ impl Viewer {
         self.printing.run_requested(&self.document, window);
     }
 
+    pub fn can_print(&self) -> bool {
+        self.document.permissions().print
+    }
+
+    pub fn request_print(&mut self) {
+        if self.can_print() {
+            self.printing.open = true;
+        } else {
+            self.error = Some("This PDF does not allow printing".into());
+        }
+    }
+
     pub fn modal_open(&self) -> bool {
         self.printing.open
     }
@@ -376,11 +388,7 @@ impl Viewer {
         let previous = (self.document.current_page(), self.zoom);
         if root.is_enabled() && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::P))
         {
-            if self.document.permissions().print {
-                self.printing.open = true;
-            } else {
-                self.error = Some("This PDF does not allow printing".into());
-            }
+            self.request_print();
         }
         // Register the modal backdrop before the viewer and keep its keyboard
         // events out of global page, search, zoom and sidebar shortcuts.

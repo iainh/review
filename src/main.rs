@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod annotations;
+mod desktop;
 mod document;
 mod forms;
 mod inspection;
@@ -88,6 +89,7 @@ struct App {
     fatal_error: Option<anyhow::Error>,
     proxy: Option<EventLoopProxy<AppEvent>>,
     native_ui: native_ui::NativeUi,
+    desktop: desktop::Desktop,
     pending: Option<PendingAction>,
     save_failed: bool,
 }
@@ -115,6 +117,7 @@ impl App {
             fatal_error: None,
             proxy: None,
             native_ui,
+            desktop: desktop::Desktop::default(),
             pending: None,
             save_failed: false,
         }
@@ -440,6 +443,7 @@ impl ApplicationHandler<AppEvent> for App {
         let mut attributes = Window::default_attributes()
             .with_title("Review")
             .with_visible(false)
+            .with_decorations(false)
             .with_inner_size(winit::dpi::LogicalSize::new(
                 geometry.size[0],
                 geometry.size[1],
@@ -519,6 +523,8 @@ impl ApplicationHandler<AppEvent> for App {
                 let mut submit_password = false;
                 let mut library_action = None;
                 let mut tab_action = None;
+                let mut desktop_action = None;
+                let mut menu_active = false;
                 let unsaved_active = self.pending.is_some();
                 let mut unsaved_decision = None;
                 let mut output = renderer.context.run_ui(input, |ui| {
@@ -534,41 +540,97 @@ impl ApplicationHandler<AppEvent> for App {
                             && !self.native_ui.help_open
                             && !self.viewer.as_ref().is_some_and(Viewer::modal_open)
                             && !ui.input(|input| input.key_pressed(Key::F1));
-                        library_action = self.library.ui(
+                        let (action, owns_input) = self.desktop.show(
                             ui,
-                            &mut self.store.state,
-                            self.viewer.as_ref(),
-                            library_enabled,
+                            self.viewer.is_some(),
+                            self.viewer.as_ref().is_some_and(Viewer::can_print),
+                            self.native_ui.appearance,
+                            !library_enabled,
                         );
-                        tab_action = self.tabs.ui(ui, library_enabled, self.viewer.as_ref());
-                        let id = self.tabs.active_id().unwrap_or(0);
-                        ui.push_id(("document", id), |ui| {
-                            (open_requested, quit, submit_password) = app_ui(
-                                &mut self.viewer,
-                                &mut self.open_error,
-                                &mut self.password_prompt,
+                        desktop_action = action.or(desktop_action);
+                        menu_active |= owns_input;
+                        // Match modal input isolation: menu arrows and clicks
+                        // must not also navigate the PDF or change tabs.
+                        let menu_events =
+                            menu_active.then(|| ctx.input_mut(|i| std::mem::take(&mut i.events)));
+                        ui.add_enabled_ui(!menu_active, |ui| {
+                            tab_action = self.tabs.ui(
                                 ui,
-                                &mut self.native_ui,
+                                library_enabled && !menu_active,
+                                self.viewer.as_ref(),
                             );
-                        });
-                        if let Some(error) = &self.state_error {
-                            let mut dismiss = false;
-                            egui::Window::new("Reading state").collapsible(false).show(
-                                ui.ctx(),
-                                |ui| {
-                                    ui.label(error);
-                                    dismiss = ui.button("Close").clicked();
-                                },
+                            library_action = self.library.ui(
+                                ui,
+                                &mut self.store.state,
+                                self.viewer.as_ref(),
+                                library_enabled && !menu_active,
                             );
-                            if dismiss {
-                                self.state_error = None;
+                            let id = self.tabs.active_id().unwrap_or(0);
+                            ui.push_id(("document", id), |ui| {
+                                (open_requested, quit, submit_password) = app_ui(
+                                    &mut self.viewer,
+                                    &mut self.open_error,
+                                    &mut self.password_prompt,
+                                    ui,
+                                    &mut self.native_ui,
+                                );
+                            });
+                            if let Some(error) = &self.state_error {
+                                let mut dismiss = false;
+                                egui::Window::new("Reading state").collapsible(false).show(
+                                    ui.ctx(),
+                                    |ui| {
+                                        ui.label(error);
+                                        dismiss = ui.button("Close").clicked();
+                                    },
+                                );
+                                if dismiss {
+                                    self.state_error = None;
+                                }
                             }
+                        });
+                        if let Some(events) = menu_events {
+                            ctx.input_mut(|i| i.events = events);
                         }
                     });
                     if let Some(events) = events {
                         ctx.input_mut(|i| i.events = events);
                     }
                 });
+                quit |= desktop::close_requested(&output);
+                match desktop_action {
+                    Some(desktop::Action::Open) => open_requested = true,
+                    Some(desktop::Action::Save(save_as)) => {
+                        if let Some(viewer) = &mut self.viewer {
+                            viewer.save_requested = Some(save_as);
+                        }
+                    }
+                    Some(desktop::Action::Print) => {
+                        if let Some(viewer) = &mut self.viewer {
+                            viewer.request_print();
+                        }
+                    }
+                    Some(desktop::Action::CloseTab) => {
+                        tab_action = self.tabs.active_id().map(tabs::Action::Close);
+                    }
+                    Some(desktop::Action::Quit) => quit = true,
+                    Some(desktop::Action::Appearance(appearance)) => {
+                        self.native_ui.appearance = appearance;
+                        appearance.apply(&renderer.context);
+                    }
+                    Some(desktop::Action::Fullscreen) => {
+                        output
+                            .viewport_output
+                            .get_mut(&egui::ViewportId::ROOT)
+                            .unwrap()
+                            .commands
+                            .push(egui::ViewportCommand::Fullscreen(
+                                renderer.window().fullscreen().is_none(),
+                            ));
+                    }
+                    Some(desktop::Action::Help) => self.native_ui.open_help(&renderer.context),
+                    None => {}
+                }
                 let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
                 self.repaint_at = Instant::now().checked_add(delay);
                 let title = self
@@ -1458,7 +1520,7 @@ mod tests {
         let (_, output) = frame(&mut app, &ctx, vec![]);
         let tree = output.platform_output.accesskit_update.unwrap();
         use egui::accesskit::Role;
-        for label in ["Zoom in", "Zoom out", "Page text", "Shortcut help"] {
+        for label in ["Zoom in", "Zoom out", "Page text"] {
             assert!(
                 tree.nodes
                     .iter()
