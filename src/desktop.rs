@@ -448,7 +448,9 @@ mod tests {
         let mut desktop = Desktop::default();
         frame(&ctx, &mut desktop, 900.0, vec![], false);
         assert_eq!(desktop.bar.items_fitted.len(), 3);
-        frame(&ctx, &mut desktop, 240.0, vec![], false);
+        // macOS's compact traffic lights leave room for all three menus at
+        // 240 points. Exercise overflow with a width narrow on every platform.
+        frame(&ctx, &mut desktop, 160.0, vec![], false);
         assert!(desktop.bar.items_fitted.len() < 3);
         assert_eq!(desktop.bar.menu_order.len(), 3);
         assert_eq!(desktop.bar.background_color, egui::Color32::BLACK);
