@@ -15,6 +15,7 @@ pollster = "0.4"
 rfd = "0.16"
 wgpu = "29"
 winit = "0.30"
+zeroize = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -22,6 +23,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [dev-dependencies]
 tempfile = "3"
+
+[patch.crates-io]
+# Correct permission-bit conversion; see vendor/README.md.
+mupdf = { path = "vendor/mupdf" }
 
 [profile.release]
 lto = "thin"

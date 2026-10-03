@@ -247,6 +247,20 @@ impl Viewer {
                     *open_requested = true;
                 }
             });
+            let permissions = self.document.permissions();
+            if !permissions.print || !permissions.print_high_quality || !permissions.copy {
+                let printing = if !permissions.print {
+                    "not allowed"
+                } else if !permissions.print_high_quality {
+                    "low quality only"
+                } else {
+                    "allowed"
+                };
+                ui.label(format!(
+                    "PDF permissions: printing {printing}; copying {}. Viewing and search remain available.",
+                    if permissions.copy { "allowed" } else { "not allowed" }
+                ));
+            }
             if let Some(error) = &self.error {
                 ui.colored_label(Color32::LIGHT_RED, error);
             }

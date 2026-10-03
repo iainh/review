@@ -18,7 +18,18 @@ Launch without a path to open an empty window. Use **Open** or **Ctrl+O**
 onto the window. Opening another PDF replaces the current document and resets
 navigation, zoom, search and previews. Cancelling the dialog or failing to open
 a file leaves the current PDF unchanged; errors appear in the window.
-Password-protected PDFs are not supported.
+
+Password-protected PDFs open through a masked password prompt. Press **Enter**
+or **Open PDF** to unlock; an incorrect password clears the field for retry.
+**Cancel** or **Escape** leaves the current document, page and zoom unchanged.
+Passwords are never saved or logged. The unlocked document retains its password
+only in memory for the session, so rendering workers can authenticate their
+own MuPDF documents. The session password is cleared when its last document
+or worker source is dropped.
+
+PDF print and copy restrictions appear below the toolbar. Viewing and search
+remain available even when copying is prohibited. Owner-password access grants
+full permissions; PDFs with an empty user password open without prompting.
 
 `review --help` prints usage without opening a window. Use `review -- -draft.pdf`
 for a filename that starts with a dash. Review displays one PDF at a time.
@@ -152,6 +163,9 @@ removal in a disposable XDG home; it requires `gio` and optionally uses
 cancellation, error recovery and replacement using a synthetic PDF in the Sway
 session described below. It requires a GTK file-chooser portal or Zenity and
 `python3-pyatspi` to activate native chooser controls through accessibility.
+`bash tests/wayland-password.sh` uses the same session and chooser workflow to
+check masked password entry, retry, keyboard and button cancellation, preserved
+navigation, owner access and permission notices with synthetic encrypted PDFs.
 
 `bash tests/wayland.sh` exercises native keyboard and pointer input under Sway
 using the OpenID Connect handbook. It requires `swaymsg`, `wtype`, `grim`,

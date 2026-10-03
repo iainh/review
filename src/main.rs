@@ -21,10 +21,19 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::{Window, WindowId},
 };
+use zeroize::{Zeroize, Zeroizing};
+
+struct PasswordPrompt {
+    path: PathBuf,
+    input: Zeroizing<String>,
+    incorrect: bool,
+    focus: bool,
+}
 
 struct App {
     viewer: Option<Viewer>,
     open_error: Option<String>,
+    password_prompt: Option<PasswordPrompt>,
     renderer: Option<Renderer>,
     repaint_at: Option<Instant>,
     fatal_error: Option<anyhow::Error>,
@@ -35,6 +44,7 @@ impl App {
         Self {
             viewer: None,
             open_error: None,
+            password_prompt: None,
             renderer: None,
             repaint_at: None,
             fatal_error: None,
@@ -42,10 +52,39 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf) {
-        match document::PdfDocument::open(path) {
-            Ok(document) => {
+        self.password_prompt = None;
+        self.open_error = None;
+        match document::PdfDocument::open_with_password(&path, None) {
+            Ok(Some(document)) => {
                 self.viewer = Some(Viewer::new(document));
-                self.open_error = None;
+            }
+            Ok(None) => {
+                self.password_prompt = Some(PasswordPrompt {
+                    path,
+                    input: Zeroizing::new(String::new()),
+                    incorrect: false,
+                    focus: true,
+                })
+            }
+            Err(error) => self.open_error = Some(format!("{error:#}")),
+        }
+        if let Some(renderer) = &self.renderer {
+            renderer.window().request_redraw();
+        }
+    }
+
+    fn submit_password(&mut self) {
+        let Some(mut prompt) = self.password_prompt.take() else {
+            return;
+        };
+        let result = document::PdfDocument::open_with_password(&prompt.path, Some(&prompt.input));
+        prompt.input.zeroize();
+        match result {
+            Ok(Some(document)) => self.viewer = Some(Viewer::new(document)),
+            Ok(None) => {
+                prompt.incorrect = true;
+                prompt.focus = true;
+                self.password_prompt = Some(prompt);
             }
             Err(error) => self.open_error = Some(format!("{error:#}")),
         }
@@ -119,8 +158,14 @@ impl ApplicationHandler<PathBuf> for App {
                 let input = renderer.take_input();
                 let mut open_requested = false;
                 let mut quit = false;
+                let mut submit_password = false;
                 let output = renderer.context.run_ui(input, |ui| {
-                    (open_requested, quit) = app_ui(&mut self.viewer, &mut self.open_error, ui);
+                    (open_requested, quit, submit_password) = app_ui(
+                        &mut self.viewer,
+                        &mut self.open_error,
+                        &mut self.password_prompt,
+                        ui,
+                    );
                 });
                 let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
                 self.repaint_at = Instant::now().checked_add(delay);
@@ -135,6 +180,8 @@ impl ApplicationHandler<PathBuf> for App {
                 }
                 if quit {
                     event_loop.exit();
+                } else if submit_password {
+                    self.submit_password();
                 } else if open_requested {
                     let mut dialog = rfd::FileDialog::new()
                         .set_title("Open PDF")
@@ -179,9 +226,60 @@ impl ApplicationHandler<PathBuf> for App {
 fn app_ui(
     viewer: &mut Option<Viewer>,
     open_error: &mut Option<String>,
+    password_prompt: &mut Option<PasswordPrompt>,
     root: &mut egui::Ui,
-) -> (bool, bool) {
+) -> (bool, bool, bool) {
     let ctx = root.ctx().clone();
+    // Draw the modal first so its backdrop blocks pointer input immediately.
+    // Isolate all input from Viewer::ui, including its global search shortcuts.
+    let password_active = password_prompt.is_some();
+    let mut submit_password = false;
+    if let Some(prompt) = password_prompt {
+        let cancel_key = ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
+        let mut cancel = cancel_key;
+        egui::Modal::new(egui::Id::new("pdf_password_prompt")).show(&ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading("Password required");
+            ui.label(
+                prompt
+                    .path
+                    .file_name()
+                    .unwrap_or(prompt.path.as_os_str())
+                    .to_string_lossy(),
+            );
+            ui.label("Enter the password to open this PDF.");
+            ui.add_space(8.0);
+            ui.label("Password");
+            let mut edit = egui::TextEdit::singleline(&mut *prompt.input)
+                .id(egui::Id::new("pdf_password"))
+                .password(true)
+                .desired_width(f32::INFINITY)
+                .show(ui);
+            // Password fields must not retain plaintext undo history in egui.
+            edit.state.clear_undoer();
+            edit.state.store(&ctx, edit.response.id);
+            let field = edit.response;
+            if prompt.focus {
+                field.request_focus();
+                prompt.focus = false;
+            }
+            if prompt.incorrect {
+                ui.colored_label(egui::Color32::LIGHT_RED, "Incorrect password. Try again.");
+            }
+            ui.label("Passwords are kept only in memory while the PDF is open.");
+            ui.horizontal(|ui| {
+                submit_password = ui.button("Open PDF").clicked()
+                    || (field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)));
+                cancel |= ui.button("Cancel").clicked();
+            });
+        });
+        if cancel {
+            *password_prompt = None;
+            submit_password = false;
+        }
+    }
+    let modal_input =
+        password_active.then(|| ctx.input_mut(|input| std::mem::take(&mut input.events)));
     let mut open_requested = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::O));
     if open_error.is_some()
         && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
@@ -219,7 +317,14 @@ fn app_ui(
             *open_error = None;
         }
     }
-    (open_requested, quit)
+    if let Some(events) = modal_input {
+        ctx.input_mut(|input| input.events = events);
+    }
+    (
+        open_requested && !password_active,
+        quit && !password_active,
+        submit_password,
+    )
 }
 
 #[derive(Debug, PartialEq)]
@@ -282,6 +387,197 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    fn key_event(key: Key, modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn password_frame(
+        app: &mut App,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> ((bool, bool, bool), egui::FullOutput) {
+        let mut action = (false, false, false);
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                action = app_ui(
+                    &mut app.viewer,
+                    &mut app.open_error,
+                    &mut app.password_prompt,
+                    ui,
+                )
+            },
+        );
+        (action, output)
+    }
+
+    #[test]
+    fn password_retry_cancel_and_replacement_preserve_existing_view() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("locked.pdf");
+        document::tests::encrypted_fixture(
+            &path,
+            "open-secret",
+            mupdf::pdf::Permission::ACCESSIBILITY,
+            mupdf::pdf::Encryption::Aes256,
+        );
+        let mut app = App::new();
+        app.viewer = Some(Viewer::new(document::tests::sample_document()));
+        let ctx = egui::Context::default();
+        password_frame(
+            &mut app,
+            &ctx,
+            vec![
+                key_event(Key::ArrowRight, Modifiers::NONE),
+                key_event(Key::Plus, Modifiers::NONE),
+            ],
+        );
+        let title = app.viewer.as_ref().unwrap().title();
+        assert!(title.ends_with("2/2 — 125%"));
+        app.open(path.clone());
+        assert!(app.password_prompt.is_some());
+        assert!(app.open_error.is_none());
+        password_frame(&mut app, &ctx, vec![]);
+        let (action, _) = password_frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::Text("wrong-q".into()),
+                key_event(Key::ArrowRight, Modifiers::NONE),
+                key_event(Key::Plus, Modifiers::NONE),
+                key_event(Key::Q, Modifiers::NONE),
+                key_event(Key::O, Modifiers::COMMAND),
+            ],
+        );
+        assert_eq!(action, (false, false, false));
+        assert_eq!(app.viewer.as_ref().unwrap().title(), title);
+        let (action, _) =
+            password_frame(&mut app, &ctx, vec![key_event(Key::Enter, Modifiers::NONE)]);
+        assert!(action.2);
+        app.submit_password();
+        assert!(app.password_prompt.as_ref().unwrap().incorrect);
+        assert!(app.password_prompt.as_ref().unwrap().input.is_empty());
+        assert_eq!(app.viewer.as_ref().unwrap().title(), title);
+        password_frame(&mut app, &ctx, vec![]);
+        password_frame(&mut app, &ctx, vec![key_event(Key::Z, Modifiers::COMMAND)]);
+        assert!(app.password_prompt.as_ref().unwrap().input.is_empty());
+        let (action, _) = password_frame(
+            &mut app,
+            &ctx,
+            vec![key_event(Key::Escape, Modifiers::NONE)],
+        );
+        assert_eq!(action, (false, false, false));
+        assert!(app.password_prompt.is_none());
+        assert_eq!(app.viewer.as_ref().unwrap().title(), title);
+        app.open(path);
+        app.password_prompt
+            .as_mut()
+            .unwrap()
+            .input
+            .push_str("open-secret");
+        app.submit_password();
+        assert!(app.password_prompt.is_none());
+        assert!(app.open_error.is_none());
+        assert_eq!(
+            app.viewer.as_ref().unwrap().title(),
+            "Review — locked.pdf — 1/2 — Fit page"
+        );
+    }
+
+    #[test]
+    fn password_is_masked_and_cancel_keeps_empty_window_open() {
+        let mut app = App::new();
+        app.password_prompt = Some(PasswordPrompt {
+            path: "locked.pdf".into(),
+            input: Zeroizing::new("sensitive-text".into()),
+            incorrect: false,
+            focus: true,
+        });
+        let ctx = egui::Context::default();
+        password_frame(&mut app, &ctx, vec![]);
+        let (_, output) = password_frame(&mut app, &ctx, vec![]);
+        let drawn_text: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|s| {
+                if let egui::Shape::Text(text) = &s.shape {
+                    Some(text.galley.text())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            !drawn_text
+                .iter()
+                .any(|text| text.contains("sensitive-text"))
+        );
+        assert!(drawn_text.iter().any(|text| text.contains("••••")));
+        let (action, _) = password_frame(
+            &mut app,
+            &ctx,
+            vec![key_event(Key::Escape, Modifiers::NONE)],
+        );
+        assert_eq!(action, (false, false, false));
+        assert!(app.password_prompt.is_none());
+        assert!(app.viewer.is_none());
+    }
+
+    #[test]
+    fn another_open_or_authentication_error_discards_pending_password() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("locked.pdf");
+        document::tests::encrypted_fixture(
+            &path,
+            "open-secret",
+            mupdf::pdf::Permission::ACCESSIBILITY,
+            mupdf::pdf::Encryption::Aes256,
+        );
+        let mut app = App::new();
+        app.viewer = Some(Viewer::new(document::tests::sample_document()));
+        app.open(path.clone());
+        app.password_prompt
+            .as_mut()
+            .unwrap()
+            .input
+            .push_str("secret\0tail");
+        app.submit_password();
+        assert!(app.password_prompt.is_none());
+        assert!(!app.open_error.as_ref().unwrap().contains("secret"));
+        assert!(app.viewer.as_ref().unwrap().title().contains("sample.pdf"));
+        app.open(path);
+        app.password_prompt
+            .as_mut()
+            .unwrap()
+            .input
+            .push_str("unfinished");
+        let replacement = directory.path().join("replacement.pdf");
+        std::fs::write(&replacement, document::tests::sample_pdf("", false)).unwrap();
+        app.open(replacement);
+        assert!(app.password_prompt.is_none());
+        assert!(app.open_error.is_none());
+        assert!(
+            app.viewer
+                .as_ref()
+                .unwrap()
+                .title()
+                .contains("replacement.pdf")
+        );
+    }
+
     #[test]
     fn startup_accepts_empty_help_and_quoted_paths() {
         let parse = |args: &[&str]| parse_args(args.iter().map(OsString::from));
@@ -330,8 +626,13 @@ mod tests {
         };
         let _ = egui::Context::default().run_ui(input, |ui| {
             assert_eq!(
-                app_ui(&mut app.viewer, &mut app.open_error, ui),
-                (false, false)
+                app_ui(
+                    &mut app.viewer,
+                    &mut app.open_error,
+                    &mut app.password_prompt,
+                    ui
+                ),
+                (false, false, false)
             );
         });
         assert!(app.open_error.is_none());
@@ -358,7 +659,12 @@ mod tests {
             ..Default::default()
         };
         let _ = egui::Context::default().run_ui(input, |ui| {
-            app_ui(&mut app.viewer, &mut app.open_error, ui);
+            app_ui(
+                &mut app.viewer,
+                &mut app.open_error,
+                &mut app.password_prompt,
+                ui,
+            );
         });
         assert!(app.viewer.as_ref().unwrap().title().ends_with("2/2 — 125%"));
         let directory = tempfile::tempdir().unwrap();
@@ -392,7 +698,10 @@ mod tests {
                 ..Default::default()
             };
             let _ = egui::Context::default().run_ui(input, |ui| {
-                assert_eq!(app_ui(&mut viewer, &mut None, ui), (true, false));
+                assert_eq!(
+                    app_ui(&mut viewer, &mut None, &mut None, ui),
+                    (true, false, false)
+                );
             });
         }
     }

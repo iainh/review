@@ -1721,8 +1721,6 @@ dependencies = [
 [[package]]
 name = "mupdf"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "185fb74927a40c569b7152c01c73f4c0206059b8b3d37c7eb007cc3f63453b64"
 dependencies = [
  "bitflags 2.13.2",
  "font-kit",
@@ -2645,6 +2643,7 @@ dependencies = [
  "tempfile",
  "wgpu",
  "winit",
+ "zeroize",
 ]
 
 [[package]]
@@ -4321,6 +4320,12 @@ dependencies = [
  "syn 3.0.6",
  "synstructure",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zerotrie"

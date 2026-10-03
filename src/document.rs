@@ -1,7 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, ensure};
 use mupdf::{Colorspace, Document, Matrix, TextPageFlags, text_page::SearchHitResponse};
+use zeroize::Zeroizing;
 
 const PAGE_MARGIN: u32 = 64;
 
@@ -18,32 +22,78 @@ pub struct SearchMatch {
 }
 
 pub struct PdfDocument {
-    document: Document,
+    document: mupdf::pdf::PdfDocument,
     path: PathBuf,
     page_count: usize,
     current_page: usize,
+    session_password: Option<Arc<Zeroizing<String>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PdfPermissions {
+    pub print: bool,
+    pub print_high_quality: bool,
+    pub copy: bool,
+}
+
+/// Only owned Rust data crosses threads. Open this source on the worker so
+/// MuPDF's document and pages stay on the thread that created them.
+/// Deliberately not Debug: the session password must never reach logs.
+#[allow(dead_code)] // Consumed by the upcoming background-rendering stage.
+pub struct WorkerSource {
+    path: PathBuf,
+    password: Option<Arc<Zeroizing<String>>>,
+}
+
+#[allow(dead_code)]
+impl WorkerSource {
+    pub fn open(&self) -> Result<PdfDocument> {
+        PdfDocument::open_with_password(&self.path, self.password.as_deref().map(|p| p.as_str()))?
+            .context("PDF password changed; reopen the document")
+    }
 }
 
 impl PdfDocument {
+    #[allow(dead_code)] // Also used by document/sidebar fixture tests.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_password(path, None)?.context("PDF requires a password")
+    }
+
+    /// None means authentication is required or the supplied password was
+    /// incorrect. Other failures are errors. No viewer state changes here.
+    pub fn open_with_password(
+        path: impl AsRef<Path>,
+        password: Option<&str>,
+    ) -> Result<Option<Self>> {
         let path = path.as_ref().to_path_buf();
         #[cfg(windows)]
         let mupdf_path = path.to_str().context("PDF path is not valid UTF-8")?;
         #[cfg(not(windows))]
         let mupdf_path = path.as_path();
-        let document = Document::open(mupdf_path)
+        let mut document = Document::open(mupdf_path)
             .with_context(|| format!("failed to open PDF at {}", path.display()))?;
         ensure!(
             document.is_pdf(),
             "{} is not a PDF document",
             path.display()
         );
-        ensure!(
-            !document
-                .needs_password()
-                .context("failed to read PDF encryption")?,
-            "Password-protected PDFs are not supported"
-        );
+        // This also authenticates PDFs with an empty user password. Do not
+        // repeat it after authentication: it can reset owner access.
+        let needs_password = document
+            .needs_password()
+            .context("failed to read PDF encryption")?;
+        if let Some(password) = password {
+            if !document
+                .authenticate(password)
+                .context("failed to authenticate PDF")?
+            {
+                return Ok(None);
+            }
+        } else if needs_password {
+            return Ok(None);
+        }
+        let document = mupdf::pdf::PdfDocument::try_from(document)
+            .context("failed to read PDF permissions")?;
         let page_count = usize::try_from(
             document
                 .page_count()
@@ -52,12 +102,32 @@ impl PdfDocument {
         .context("PDF reported a negative page count")?;
         ensure!(page_count > 0, "PDF contains no pages");
 
-        Ok(Self {
+        Ok(Some(Self {
             document,
             path,
             page_count,
             current_page: 0,
-        })
+            session_password: password.map(|p| Arc::new(Zeroizing::new(p.to_owned()))),
+        }))
+    }
+
+    pub fn permissions(&self) -> PdfPermissions {
+        use mupdf::pdf::Permission;
+        let permissions = self.document.permissions();
+        PdfPermissions {
+            print: permissions.contains(Permission::PRINT),
+            print_high_quality: permissions.contains(Permission::PRINT)
+                && permissions.contains(Permission::PRINT_HQ),
+            copy: permissions.contains(Permission::COPY),
+        }
+    }
+
+    #[allow(dead_code)] // Integration hook for worker-local rendering.
+    pub fn worker_source(&self) -> WorkerSource {
+        WorkerSource {
+            path: self.path.clone(),
+            password: self.session_password.clone(),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -218,6 +288,146 @@ fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{PdfDocument, fit_scale, rgb_to_rgba};
+    use mupdf::pdf::{Encryption, PdfWriteOptions, Permission};
+    use std::sync::Arc;
+
+    pub fn encrypted_fixture(
+        path: &std::path::Path,
+        user_password: &str,
+        permissions: Permission,
+        encryption: Encryption,
+    ) {
+        let bytes = sample_pdf("BT /F1 16 Tf 40 350 Td (Chapter one) Tj ET", true);
+        let pdf = mupdf::pdf::PdfDocument::try_from(
+            mupdf::Document::from_bytes(&bytes, "application/pdf").unwrap(),
+        )
+        .unwrap();
+        let mut options = PdfWriteOptions::default();
+        options
+            .set_encryption(encryption)
+            .set_owner_password("owner-secret")
+            .set_user_password(user_password)
+            .set_permissions(permissions);
+        pdf.save_with_options(path.to_str().unwrap(), options)
+            .unwrap();
+    }
+
+    #[test]
+    fn encrypted_pdf_authentication_and_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("locked résumé.pdf");
+        for encryption in [Encryption::Aes256, Encryption::Aes128, Encryption::Rc4_128] {
+            encrypted_fixture(&path, "open-secret", Permission::ACCESSIBILITY, encryption);
+            for password in [None, Some(""), Some("wrong"), Some("open-secreT")] {
+                assert!(
+                    PdfDocument::open_with_password(&path, password)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            let document = PdfDocument::open_with_password(&path, Some("open-secret"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                document.permissions(),
+                super::PdfPermissions {
+                    print: false,
+                    print_high_quality: false,
+                    copy: false
+                }
+            );
+            assert_eq!(document.page_count(), 2);
+            assert_eq!(document.search_page(0, "Chapter").unwrap().len(), 1);
+            assert_eq!(document.outlines().unwrap()[0].down.len(), 1);
+            assert!(document.render_page(1, (244, 244), 1.0).is_ok());
+            let owner = PdfDocument::open_with_password(&path, Some("owner-secret"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner.permissions(),
+                super::PdfPermissions {
+                    print: true,
+                    print_high_quality: true,
+                    copy: true
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn empty_password_and_low_quality_print_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("restricted.pdf");
+        encrypted_fixture(
+            &path,
+            "",
+            Permission::PRINT | Permission::ACCESSIBILITY,
+            Encryption::Aes256,
+        );
+        let document = PdfDocument::open(&path).unwrap();
+        assert_eq!(
+            document.permissions(),
+            super::PdfPermissions {
+                print: true,
+                print_high_quality: false,
+                copy: false
+            }
+        );
+        assert!(document.session_password.is_none());
+        encrypted_fixture(
+            &path,
+            "",
+            Permission::COPY | Permission::ACCESSIBILITY,
+            Encryption::Aes256,
+        );
+        assert_eq!(
+            PdfDocument::open(&path).unwrap().permissions(),
+            super::PdfPermissions {
+                print: false,
+                print_high_quality: false,
+                copy: true
+            }
+        );
+        assert_eq!(
+            sample_document().permissions(),
+            super::PdfPermissions {
+                print: true,
+                print_high_quality: true,
+                copy: true
+            }
+        );
+    }
+
+    #[test]
+    fn worker_source_reauthenticates_on_its_own_thread() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("locked.pdf");
+        encrypted_fixture(
+            &path,
+            "open-secret",
+            Permission::ACCESSIBILITY,
+            Encryption::Aes256,
+        );
+        for password in ["open-secret", "owner-secret"] {
+            let document = PdfDocument::open_with_password(&path, Some(password))
+                .unwrap()
+                .unwrap();
+            let permissions = document.permissions();
+            let source = document.worker_source();
+            let secret = Arc::downgrade(document.session_password.as_ref().unwrap());
+            drop(document);
+            assert!(secret.upgrade().is_some());
+            std::thread::spawn(move || {
+                let document = source.open().unwrap();
+                assert_eq!(document.permissions(), permissions);
+                assert_eq!(document.search_page(0, "Chapter").unwrap().len(), 1);
+                assert!(document.render_page(1, (244, 244), 1.0).is_ok());
+            })
+            .join()
+            .unwrap();
+            assert!(secret.upgrade().is_none());
+        }
+    }
 
     #[test]
     fn opens_pdf_with_spaces_and_unicode_in_filename() {
@@ -253,11 +463,14 @@ pub(crate) mod tests {
 
     fn sample_with_text(text: &str) -> PdfDocument {
         PdfDocument {
-            document: mupdf::Document::from_bytes(&sample_pdf(text, false), "application/pdf")
-                .unwrap(),
+            document: mupdf::pdf::PdfDocument::try_from(
+                mupdf::Document::from_bytes(&sample_pdf(text, false), "application/pdf").unwrap(),
+            )
+            .unwrap(),
             path: "sample.pdf".into(),
             page_count: 2,
             current_page: 0,
+            session_password: None,
         }
     }
 
@@ -306,6 +519,18 @@ pub(crate) mod tests {
             sample_pdf("BT /F1 16 Tf 40 350 Td (Chapter one) Tj ET", true),
         )
         .unwrap();
+        encrypted_fixture(
+            &directory.join("locked.pdf"),
+            "open-secret",
+            Permission::ACCESSIBILITY,
+            Encryption::Aes256,
+        );
+        encrypted_fixture(
+            &directory.join("restricted.pdf"),
+            "",
+            Permission::PRINT | Permission::ACCESSIBILITY,
+            Encryption::Aes256,
+        );
     }
 
     #[test]
