@@ -1,5 +1,6 @@
 mod document;
 mod renderer;
+mod search;
 mod viewer;
 
 use std::{env, path::PathBuf, sync::Arc, time::Instant};

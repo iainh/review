@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use mupdf::{Colorspace, Document, Matrix};
+use mupdf::{Colorspace, Document, Matrix, TextPageFlags, text_page::SearchHitResponse};
 
 const PAGE_MARGIN: u32 = 64;
 
@@ -9,6 +9,12 @@ pub struct PageImage {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+pub struct SearchMatch {
+    pub page: usize,
+    /// One normalized quad per line of a single occurrence, in perimeter order.
+    pub quads: Vec<[[f32; 2]; 4]>,
 }
 
 pub struct PdfDocument {
@@ -64,6 +70,37 @@ impl PdfDocument {
         self.go_to_page(next)
     }
 
+    pub fn search_page(&self, page_number: usize, query: &str) -> Result<Vec<SearchMatch>> {
+        ensure!(page_number < self.page_count, "page is out of range");
+        if query.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        let page = self.document.load_page(page_number as i32)?;
+        let bounds = page.bounds()?;
+        let text = page.to_text_page(TextPageFlags::empty())?;
+        let mut matches = Vec::new();
+        // The callback groups multiline quads into one occurrence and has no
+        // fixed hit limit, unlike Page::search.
+        text.search_cb(query, &mut matches, |matches, quads| {
+            matches.push(SearchMatch {
+                page: page_number,
+                quads: quads
+                    .iter()
+                    .map(|quad| {
+                        [quad.ul, quad.ur, quad.lr, quad.ll].map(|point| {
+                            [
+                                (point.x - bounds.x0) / (bounds.x1 - bounds.x0),
+                                (point.y - bounds.y0) / (bounds.y1 - bounds.y0),
+                            ]
+                        })
+                    })
+                    .collect(),
+            });
+            SearchHitResponse::ContinueSearch
+        })?;
+        Ok(matches)
+    }
+
     pub fn render_current(&self, viewport: (u32, u32), zoom: f32) -> Result<PageImage> {
         let page = self.document.load_page(self.current_page as i32)?;
         let bounds = page.bounds()?;
@@ -116,6 +153,10 @@ pub(crate) mod tests {
     pub fn sample_document() -> PdfDocument {
         let text =
             "BT /F1 16 Tf 40 350 Td (Alpha alpha) Tj 0 -24 Td (Needle) Tj 0 -24 Td (phrase) Tj ET";
+        sample_with_text(text)
+    }
+
+    fn sample_with_text(text: &str) -> PdfDocument {
         let last = "BT /F1 16 Tf 30 120 Td (Last alpha) Tj ET";
         let objects = [
             "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
@@ -161,6 +202,45 @@ pub(crate) mod tests {
         assert_eq!(document.current_page(), 1);
         assert!(document.change_page(-1));
         assert_eq!(document.current_page(), 0);
+    }
+
+    #[test]
+    fn search_groups_multiline_matches_and_normalizes_coordinates() {
+        let document = sample_document();
+        let hits = document.search_page(0, "ALPHA").unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].page, 0);
+        assert!((hits[0].quads[0][0][0] - 0.1).abs() < 0.001);
+        assert!(hits[1].quads[0][0][0] > hits[0].quads[0][1][0]);
+        let phrase = document.search_page(0, "needle phrase").unwrap();
+        assert_eq!(phrase.len(), 1);
+        assert_eq!(phrase[0].quads.len(), 2);
+        assert!(phrase[0].quads[1][0][1] > phrase[0].quads[0][0][1]);
+        assert!(document.search_page(0, "absent").unwrap().is_empty());
+        assert!(document.search_page(0, " ").unwrap().is_empty());
+        assert!(document.search_page(2, "alpha").is_err());
+    }
+
+    #[test]
+    fn search_does_not_truncate_dense_pages() {
+        let text = format!(
+            "BT /F1 8 Tf 40 380 Td {} ET",
+            "(alpha) Tj 0 -10 Td ".repeat(30)
+        );
+        let document = sample_with_text(&text);
+        assert_eq!(document.search_page(0, "alpha").unwrap().len(), 30);
+    }
+
+    #[test]
+    #[ignore = "requires REVIEW_TEST_PDF pointing to the OpenID Connect handbook"]
+    fn handbook_search_matches_known_page_numbers() {
+        let document = PdfDocument::open(std::env::var("REVIEW_TEST_PDF").unwrap()).unwrap();
+        assert_eq!(document.page_count(), 45);
+        let pages: Vec<_> = (0..45)
+            .flat_map(|page| document.search_page(page, "Recap").unwrap())
+            .map(|hit| hit.page + 1)
+            .collect();
+        assert_eq!(pages, [2, 2, 2, 7, 17, 17, 44]);
     }
 
     #[test]

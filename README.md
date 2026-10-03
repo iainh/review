@@ -21,6 +21,13 @@ Use **Ctrl+G** (**Cmd+G** on macOS) to select the page field. Enter a page
 number and press **Enter** or click **Go**. Page numbers start at one; invalid
 numbers leave the current page unchanged. **Escape** cancels page editing.
 
+Use **Ctrl+F** (**Cmd+F** on macOS) or **Search** to find text. Press **Enter**
+or click **Find** to search the document, ignoring case. **Enter**/**F3**
+advances to the next occurrence; **Shift+Enter**/**Shift+F3** goes back.
+Search wraps at both ends. The current occurrence is orange and other matches
+on the page are yellow. **Escape** or **Close** closes search and clears highlights.
+Search uses the PDF's text layer; scanned images without text require OCR.
+
 ## Design
 
 - MuPDF rasterizes only the current page at the display scale.
@@ -38,8 +45,10 @@ using the OpenID Connect handbook. It requires `swaymsg`, `wtype`, `grim`,
 `XDG_RUNTIME_DIR`, and `SWAYSOCK` set. Use a disposable session: the test
 opens and closes its own Review window. Set `REVIEW_TEST_PDF` to a local copy
 of the handbook and `REVIEW_SCREENSHOTS` to save screenshots for inspection.
+With `REVIEW_TEST_PDF` set, run `cargo test -- --ignored` to check known
+handbook search results.
 
-This is a foundation, not a complete viewer. Search, text selection, links,
+This is a foundation, not a complete viewer. Text selection, links,
 annotations, tabs, and persistent preferences are not implemented yet.
 
 ## Licence

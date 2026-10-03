@@ -66,3 +66,33 @@ expect_page 2
 key Left
 expect_page 1
 echo 'PASS: Wayland go-to-page and navigation'
+
+goto_page 7
+wtype -s 150 -M ctrl -k f -m ctrl -s 150 'rEcAp' -s 150 -k Return -s 150
+sleep 2
+expect_page 7
+capture search-highlight
+key F3
+expect_page 17
+wtype -s 150 -M shift -k F3 -m shift -s 150
+expect_page 7
+key Return
+expect_page 17
+capture search-multiple-matches
+key F3
+expect_page 17
+key F3
+expect_page 44
+key F3
+expect_page 2
+wtype -s 150 -M shift -k F3 -m shift -s 150
+expect_page 44
+wtype -s 150 -M ctrl -k f -m ctrl -s 150 'no-such-text-xyz' -s 150 -k Return -s 150
+sleep 2
+expect_page 44
+capture search-no-matches
+key Escape
+expect_page 44
+key Right
+expect_page 45
+echo 'PASS: Wayland search, repeat Enter, wraparound, no matches, and Escape'
