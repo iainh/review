@@ -147,8 +147,14 @@ If Review was your default, choose another PDF viewer before uninstalling.
 
 ## Design
 
-- MuPDF rasterizes the current page at the display scale and visible previews
-  at thumbnail resolution. Off-screen preview textures are released.
+- A document worker rasterizes the visible page and previews with its own
+  authenticated MuPDF document. No MuPDF pointers cross threads. Rendering
+  completion wakes the window even when there is no keyboard or pointer input.
+- Visible pages take priority over previews and nearby-page prefetching.
+  Superseded queued work is cancelled; in-flight page operations finish but
+  stale results are discarded. Replacing a PDF does not wait for old renders.
+- The worker keeps at most 12 pixel results within a 128 MiB cache. Large
+  renders skip prefetching, and off-screen preview textures are released.
 - wgpu uploads that page once and composites it as a texture on the GPU.
 - The window redraws on demand rather than continuously.
 - Native egui controls share the winit window and wgpu surface with the page;

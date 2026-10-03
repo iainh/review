@@ -39,13 +39,11 @@ pub struct PdfPermissions {
 /// Only owned Rust data crosses threads. Open this source on the worker so
 /// MuPDF's document and pages stay on the thread that created them.
 /// Deliberately not Debug: the session password must never reach logs.
-#[allow(dead_code)] // Consumed by the upcoming background-rendering stage.
 pub struct WorkerSource {
     path: PathBuf,
     password: Option<Arc<Zeroizing<String>>>,
 }
 
-#[allow(dead_code)]
 impl WorkerSource {
     pub fn open(&self) -> Result<PdfDocument> {
         PdfDocument::open_with_password(&self.path, self.password.as_deref().map(|p| p.as_str()))?
@@ -122,7 +120,6 @@ impl PdfDocument {
         }
     }
 
-    #[allow(dead_code)] // Integration hook for worker-local rendering.
     pub fn worker_source(&self) -> WorkerSource {
         WorkerSource {
             path: self.path.clone(),
@@ -217,6 +214,7 @@ impl PdfDocument {
         Ok(size)
     }
 
+    #[allow(dead_code)] // Compatibility helper for document/worker fixture tests.
     pub fn render_page(
         &self,
         page_number: usize,

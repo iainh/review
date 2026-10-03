@@ -2,6 +2,7 @@ use egui::{Color32, Context, Key, Modifiers, TextureHandle, Vec2};
 
 use crate::{
     document::PdfDocument,
+    render_worker::{Priority, RenderKey, RenderWorker},
     search::Search,
     sidebar::Sidebar,
     zoom::{POINT_SCALE, Zoom},
@@ -15,7 +16,8 @@ pub struct Viewer {
     page_input: String,
     error: Option<String>,
     page_texture: Option<TextureHandle>,
-    rendered: Option<(usize, (u32, u32), f32)>,
+    rendered: Option<RenderKey>,
+    render_worker: RenderWorker,
     search: Search,
     reveal_match: bool,
     sidebar: Sidebar,
@@ -25,6 +27,7 @@ pub struct Viewer {
 impl Viewer {
     pub fn new(document: PdfDocument) -> Self {
         let sidebar = Sidebar::new(&document);
+        let render_worker = RenderWorker::new(document.worker_source());
         Self {
             document,
             zoom: Zoom::FitPage,
@@ -34,6 +37,7 @@ impl Viewer {
             error: None,
             page_texture: None,
             rendered: None,
+            render_worker,
             search: Search::default(),
             reveal_match: false,
             sidebar,
@@ -87,12 +91,14 @@ impl Viewer {
 
     fn change_zoom(&mut self, factor: f32) {
         self.zoom.change(factor, self.effective_zoom);
+        self.error = None;
         if let Zoom::Percent(value) = self.zoom {
             self.effective_zoom = value;
         }
     }
 
     pub fn ui(&mut self, root: &mut egui::Ui, open_requested: &mut bool) {
+        self.render_worker.begin_frame();
         let ctx = root.ctx().clone();
         let focus_page = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::G));
         let focus_zoom = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::L));
@@ -361,11 +367,15 @@ impl Viewer {
                 self.quit = input.key_pressed(Key::Q) || input.key_pressed(Key::Escape);
             });
             if previous != (self.document.current_page(), self.zoom) {
+                self.error = None;
                 ctx.request_repaint();
             }
         }
 
-        if let Some(page) = self.sidebar.ui(root, &self.document) {
+        if let Some(page) = self
+            .sidebar
+            .ui(root, &self.document, &mut self.render_worker)
+        {
             self.go_to_page(page);
             ctx.request_repaint();
         }
@@ -387,21 +397,18 @@ impl Viewer {
                 self.effective_zoom = effective;
                 ctx.request_repaint();
             }
-            let key = (self.document.current_page(), viewport, scale);
+            let key = RenderKey::new(self.document.current_page(), scale);
+            if self
+                .rendered
+                .is_some_and(|previous| previous.page != key.page)
+            {
+                self.page_texture = None;
+                self.rendered = None;
+            }
+            let mut pending = false;
             if self.rendered != Some(key) {
-                let max_side = ctx.input(|input| input.max_texture_side) as f32;
-                let image =
-                    if (size.0 * scale).ceil() > max_side || (size.1 * scale).ceil() > max_side {
-                        Err(anyhow::anyhow!(
-                            "This zoom exceeds the graphics texture limit; reduce the zoom"
-                        ))
-                    } else {
-                        self.document
-                            .render_at_scale(self.document.current_page(), scale)
-                    };
-                self.rendered = Some(key);
-                match image {
-                    Ok(image) => {
+                match self.render_worker.image(key, Priority::Page) {
+                    Some(Ok(image)) => {
                         self.page_texture = Some(ctx.load_texture(
                             "PDF page",
                             egui::ColorImage::from_rgba_unmultiplied(
@@ -410,10 +417,36 @@ impl Viewer {
                             ),
                             egui::TextureOptions::LINEAR,
                         ));
+                        self.rendered = Some(key);
                     }
-                    Err(error) => {
+                    Some(Err(error)) => {
                         self.page_texture = None;
                         self.error = Some(format!("Failed to render page: {error:#}"));
+                        self.rendered = Some(key);
+                        ctx.request_repaint();
+                    }
+                    None => pending = true,
+                }
+            }
+            // Leave room for visible thumbnails. Large renders do not prefetch,
+            // so low-priority neighbours cannot thrash the bounded pixel cache.
+            if size.0 * size.1 * scale * scale * 4.0 < 32.0 * 1024.0 * 1024.0 {
+                for neighbour in [key.page.checked_sub(1), key.page.checked_add(1)]
+                    .into_iter()
+                    .flatten()
+                {
+                    if neighbour < self.document.page_count()
+                        && let Ok(size) = self.document.page_size(neighbour)
+                    {
+                        let neighbour_scale = self.zoom.scale(viewport, size, dpi);
+                        if size.0 * size.1 * neighbour_scale * neighbour_scale * 4.0
+                            < 32.0 * 1024.0 * 1024.0
+                        {
+                            self.render_worker.image(
+                                RenderKey::new(neighbour, neighbour_scale),
+                                Priority::Prefetch,
+                            );
+                        }
                     }
                 }
             }
@@ -422,7 +455,8 @@ impl Viewer {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if let Some(texture) = &self.page_texture {
-                        let size = texture.size_vec2() / dpi;
+                        let previous_scale = self.rendered.map_or(scale, RenderKey::scale);
+                        let size = texture.size_vec2() / dpi * (scale / previous_scale);
                         let canvas = available.max(size + Vec2::splat(32.0));
                         let (rect, _) = ui.allocate_exact_size(canvas, egui::Sense::hover());
                         let page = egui::Rect::from_center_size(rect.center(), size);
@@ -467,9 +501,15 @@ impl Viewer {
                                 self.reveal_match = false;
                             }
                         }
+                    } else if pending {
+                        ui.vertical_centered(|ui| {
+                            ui.spinner();
+                            ui.label("Rendering page…");
+                        });
                     }
                 });
         });
+        self.render_worker.end_frame(&ctx);
     }
 }
 

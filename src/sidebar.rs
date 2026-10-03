@@ -3,7 +3,11 @@ use std::collections::HashMap;
 use egui::{Color32, TextureHandle, Vec2};
 use mupdf::Outline;
 
-use crate::document::PdfDocument;
+use crate::{
+    document::PdfDocument,
+    render_worker::{Priority, RenderKey, RenderWorker},
+    zoom::Zoom,
+};
 
 const PREVIEW_HEIGHT: f32 = 210.0;
 
@@ -30,7 +34,12 @@ impl Sidebar {
         }
     }
 
-    pub fn ui(&mut self, root: &mut egui::Ui, document: &PdfDocument) -> Option<usize> {
+    pub fn ui(
+        &mut self,
+        root: &mut egui::Ui,
+        document: &PdfDocument,
+        worker: &mut RenderWorker,
+    ) -> Option<usize> {
         if !self.open {
             return None;
         }
@@ -46,7 +55,7 @@ impl Sidebar {
                 });
                 ui.separator();
                 if self.pages {
-                    destination = self.page_previews(ui, document);
+                    destination = self.page_previews(ui, document, worker);
                 } else {
                     match &self.outline {
                         Ok(outline) if outline.is_empty() => {
@@ -72,7 +81,12 @@ impl Sidebar {
         destination
     }
 
-    fn page_previews(&mut self, ui: &mut egui::Ui, document: &PdfDocument) -> Option<usize> {
+    fn page_previews(
+        &mut self,
+        ui: &mut egui::Ui,
+        document: &PdfDocument,
+        worker: &mut RenderWorker,
+    ) -> Option<usize> {
         let dpi = ui.ctx().pixels_per_point();
         if self.thumbnail_dpi != dpi {
             self.thumbnails.clear();
@@ -93,22 +107,34 @@ impl Sidebar {
             // with the document's page count.
             self.thumbnails.retain(|page, _| visible.contains(page));
             for page in visible {
-                let texture = self.thumbnails.entry(page).or_insert_with(|| {
+                if let std::collections::hash_map::Entry::Vacant(e) = self.thumbnails.entry(page) {
                     let viewport = ((244.0 * dpi) as u32, (244.0 * dpi) as u32);
-                    document
-                        .render_page(page, viewport, 1.0)
-                        .map(|image| {
-                            ui.ctx().load_texture(
-                                format!("preview {page}"),
-                                egui::ColorImage::from_rgba_unmultiplied(
-                                    [image.width as usize, image.height as usize],
-                                    &image.rgba,
-                                ),
-                                egui::TextureOptions::LINEAR,
-                            )
-                        })
-                        .map_err(|error| format!("Preview unavailable: {error:#}"))
-                });
+                    match document.page_size(page) {
+                        Ok(size) => {
+                            let scale = Zoom::FitPage.scale(viewport, size, dpi);
+                            if let Some(image) =
+                                worker.image(RenderKey::new(page, scale), Priority::Thumbnail)
+                            {
+                                let texture = image
+                                    .map(|image| {
+                                        ui.ctx().load_texture(
+                                            format!("preview {page}"),
+                                            egui::ColorImage::from_rgba_unmultiplied(
+                                                [image.width as usize, image.height as usize],
+                                                &image.rgba,
+                                            ),
+                                            egui::TextureOptions::LINEAR,
+                                        )
+                                    })
+                                    .map_err(|error| format!("Preview unavailable: {error}"));
+                                e.insert(texture);
+                            }
+                        }
+                        Err(error) => {
+                            e.insert(Err(format!("Preview unavailable: {error:#}")));
+                        }
+                    }
+                }
                 let (rect, response) = ui.allocate_exact_size(
                     Vec2::new(ui.available_width(), PREVIEW_HEIGHT),
                     egui::Sense::click(),
@@ -121,8 +147,8 @@ impl Sidebar {
                     Color32::TRANSPARENT
                 };
                 ui.painter().rect_filled(rect, 4.0, fill);
-                match texture {
-                    Ok(texture) => {
+                match self.thumbnails.get(&page) {
+                    Some(Ok(texture)) => {
                         let original = texture.size_vec2();
                         let scale = ((rect.width() - 20.0) / original.x).min(180.0 / original.y);
                         let image = egui::Rect::from_center_size(
@@ -136,8 +162,17 @@ impl Sidebar {
                             Color32::WHITE,
                         );
                     }
-                    Err(error) => {
+                    Some(Err(error)) => {
                         response.clone().on_hover_text(error.as_str());
+                    }
+                    None => {
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Loading…",
+                            egui::FontId::proportional(13.0),
+                            ui.visuals().weak_text_color(),
+                        );
                     }
                 }
                 ui.painter().text(
@@ -219,6 +254,7 @@ mod tests {
     #[ignore = "requires REVIEW_TEST_PDF pointing to the OpenID Connect handbook"]
     fn handbook_previews_are_lazy_and_follow_navigation() {
         let mut document = PdfDocument::open(std::env::var("REVIEW_TEST_PDF").unwrap()).unwrap();
+        let mut worker = crate::render_worker::RenderWorker::new(document.worker_source());
         let mut sidebar = Sidebar::new(&document);
         sidebar.pages = true;
         let ctx = egui::Context::default();
@@ -229,16 +265,36 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run_ui(input.clone(), |ui| {
-            sidebar.ui(ui, &document);
-        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !sidebar.thumbnails.contains_key(&0) {
+            worker.begin_frame();
+            let _ = ctx.run_ui(input.clone(), |ui| {
+                sidebar.ui(ui, &document, &mut worker);
+            });
+            worker.end_frame(&ctx);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "preview worker did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(sidebar.thumbnails.contains_key(&0));
         assert!(sidebar.thumbnails.len() <= 6);
         assert!(sidebar.thumbnails.values().all(|image| image.is_ok()));
         document.go_to_page(44);
-        let _ = ctx.run_ui(input, |ui| {
-            sidebar.ui(ui, &document);
-        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !sidebar.thumbnails.contains_key(&44) {
+            worker.begin_frame();
+            let _ = ctx.run_ui(input.clone(), |ui| {
+                sidebar.ui(ui, &document, &mut worker);
+            });
+            worker.end_frame(&ctx);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "preview worker did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(sidebar.thumbnails.contains_key(&44));
         assert!(!sidebar.thumbnails.contains_key(&0));
         assert!(sidebar.thumbnails.len() <= 6);

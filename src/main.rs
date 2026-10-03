@@ -3,6 +3,7 @@
 mod document;
 #[cfg(target_os = "macos")]
 mod macos;
+mod render_worker;
 mod renderer;
 mod search;
 mod sidebar;
@@ -220,6 +221,11 @@ impl ApplicationHandler<PathBuf> for App {
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Drop/join egui's clipboard worker before winit destroys the display.
+        self.renderer = None;
     }
 }
 

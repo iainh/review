@@ -57,6 +57,16 @@ impl Renderer {
         surface.configure(&device, &config);
         let context = egui::Context::default();
         context.set_visuals(egui::Visuals::dark());
+        let repaint_window = Arc::downgrade(&window);
+        context.set_request_repaint_callback(move |request| {
+            // Delayed UI repaints are scheduled from FullOutput by App.
+            // Worker contexts must not keep a window alive after shutdown.
+            if request.delay.is_zero()
+                && let Some(window) = repaint_window.upgrade()
+            {
+                window.request_redraw();
+            }
+        });
         let input = egui_winit::State::new(
             context.clone(),
             egui::ViewportId::ROOT,
