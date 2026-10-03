@@ -866,6 +866,104 @@ pub(crate) mod tests {
         }
     }
 
+    pub fn geometry_fixture(path: &std::path::Path) {
+        let bytes = sample_pdf(
+            "q 1 0 0 rg 50 80 40 80 re f /Blend gs 0 0 1 rg 70 100 50 60 re f Q \
+             BT /F1 12 Tf 150 180 Td (Cropped rotation) Tj ET",
+            false,
+        );
+        let pdf = mupdf::pdf::PdfDocument::try_from(
+            mupdf::Document::from_bytes(&bytes, "application/pdf").unwrap(),
+        )
+        .unwrap();
+        let mut page = pdf.find_page(0).unwrap();
+        for (key, value) in [
+            ("CropBox", "[30 60 270 210]"),
+            ("Rotate", "90"),
+            (
+                "Resources",
+                "<< /Font << /F1 5 0 R >> /ExtGState << /Blend << /Type /ExtGState /ca 0.5 /CA 0.5 >> >> >>",
+            ),
+        ] {
+            page.dict_put(key, pdf.new_object_from_str(value).unwrap())
+                .unwrap();
+        }
+        drop(page);
+        pdf.save(path.to_str().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn cropped_rotated_transparency_preserves_pixels_text_and_worker_geometry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("geometry.pdf");
+        geometry_fixture(&path);
+        let document = PdfDocument::open(&path).unwrap();
+        // CropBox is 240×150 points; intrinsic clockwise rotation swaps axes.
+        assert_eq!(document.page_size(0).unwrap(), (150.0, 240.0));
+        assert_eq!(document.page_size(1).unwrap(), (400.0, 200.0));
+        let image = document.render_at_scale(0, 1.0).unwrap();
+        assert_eq!((image.width, image.height), (150, 240));
+        let pixel = |x: usize, y: usize| {
+            let offset = (y * image.width as usize + x) * 4;
+            &image.rgba[offset..offset + 4]
+        };
+        assert_eq!(pixel(0, 0), [255, 255, 255, 255]);
+        // PDF (x,y) maps to (y−60,x−30) after crop and intrinsic rotation.
+        assert_eq!(pixel(25, 25), [255, 0, 0, 255]);
+        // Allow alpha quantization and channel rounding in the 8-bit compositor.
+        for (point, expected) in [((50, 50), [128, 0, 128]), ((80, 70), [128, 128, 255])] {
+            for (actual, expected) in pixel(point.0, point.1)[..3].iter().zip(expected) {
+                assert!(
+                    actual.abs_diff(expected) <= 2,
+                    "incorrect alpha blending at {point:?}: {:?}",
+                    pixel(point.0, point.1)
+                );
+            }
+        }
+        let text = document.structured_text(0).unwrap();
+        assert_eq!(text.plain_text(), "Cropped rotation");
+        assert!(text.chars.iter().filter_map(|ch| ch.quad).all(|quad| {
+            quad.iter()
+                .flatten()
+                .all(|coordinate| (0.0..=1.0).contains(coordinate))
+        }));
+        let source = document.worker_source();
+        let worker_image = std::thread::spawn(move || {
+            let document = source.open().unwrap();
+            assert_eq!(document.page_size(0).unwrap(), (150.0, 240.0));
+            document.render_at_scale(0, 1.0).unwrap()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(worker_image.rgba, image.rgba);
+        assert_eq!(document.current_page(), 0);
+    }
+
+    #[test]
+    fn broken_startxref_recovers_content_and_page_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("repaired.pdf");
+        let original = sample_pdf("BT /F1 12 Tf 40 350 Td (Recover this text) Tj ET", false);
+        let mut repaired = String::from_utf8(original).unwrap();
+        repaired.truncate(repaired.rfind("startxref").unwrap());
+        repaired.push_str("startxref\n0\n%%EOF");
+        std::fs::write(&path, repaired).unwrap();
+        let document = PdfDocument::open(path).unwrap();
+        assert_eq!(document.page_count(), 2);
+        assert_eq!(document.page_text(0).unwrap(), "Recover this text");
+        assert_eq!(document.page_text(1).unwrap(), "Last alpha");
+        let image = document.render_at_scale(1, 1.0).unwrap();
+        assert_eq!((image.width, image.height), (400, 200));
+        assert!(
+            image
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[0] < 128)
+        );
+    }
+
     #[test]
     fn navigation_rejects_out_of_range_pages_without_moving() {
         let mut document = sample_document();

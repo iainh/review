@@ -1071,6 +1071,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
         app.viewer = Some(Viewer::new(document::tests::sample_document()));
+        let location = persistence::ReadingState {
+            page: 1,
+            scroll: [13.0, 29.0],
+            zoom: zoom::Zoom::Percent(1.25),
+        };
+        app.viewer.as_mut().unwrap().restore_reading(&location);
+        let saved_state = app.store.state.clone();
         app.open("/missing/review-no-such-file.pdf".into());
         assert!(
             app.open_error
@@ -1079,6 +1086,22 @@ mod tests {
                 .contains("failed to open PDF")
         );
         assert!(app.viewer.as_ref().unwrap().title().contains("sample.pdf"));
+        let pageless = String::from_utf8(document::tests::sample_pdf("", false))
+            .unwrap()
+            .replace("/Kids [3 0 R 4 0 R] /Count 2", "/Kids [] /Count 0");
+        for (name, bytes) in [
+            ("empty.pdf", Vec::new()),
+            ("invalid.pdf", b"not a PDF document".to_vec()),
+            ("pageless.pdf", pageless.into_bytes()),
+        ] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            app.open(path);
+            assert!(app.open_error.is_some(), "{name} must be rejected");
+            assert!(app.password_prompt.is_none());
+            assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
+            assert_eq!(app.store.state, saved_state);
+        }
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,

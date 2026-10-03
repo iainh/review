@@ -357,6 +357,9 @@ If Review was your default, choose another PDF viewer before uninstalling.
 ## Testing
 
 Run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
+Generated PDF fixtures cover mixed page sizes, nonzero crop origins, intrinsic
+rotation, transparency, Unicode, encryption, layers, links and outlines. Tests
+also check cross-reference repair and rejected files without losing reading state.
 `bash tests/linux-desktop.sh` checks Linux registration, path escaping and
 removal in a disposable XDG home; it requires `gio` and optionally uses
 `desktop-file-validate`. `bash tests/wayland-open.sh` checks native file dialogs,
