@@ -2,6 +2,7 @@ use egui::{Color32, Context, Key, Modifiers, TextureHandle, Vec2};
 
 use crate::{
     document::PdfDocument,
+    page_text::PageText,
     printing::PrintDialog,
     render_worker::{Priority, RenderKey, RenderWorker},
     search::Search,
@@ -25,7 +26,7 @@ pub struct Viewer {
     sidebar: Sidebar,
     printing: PrintDialog,
     selection: Selection,
-    pub quit: bool,
+    page_text: PageText,
 }
 
 impl Viewer {
@@ -47,7 +48,7 @@ impl Viewer {
             sidebar,
             printing: PrintDialog::default(),
             selection: Selection::default(),
-            quit: false,
+            page_text: PageText::default(),
         }
     }
 
@@ -67,6 +68,10 @@ impl Viewer {
 
     pub fn print_if_requested(&mut self, window: &winit::window::Window) {
         self.printing.run_requested(&self.document, window);
+    }
+
+    pub fn modal_open(&self) -> bool {
+        self.printing.open
     }
 
     fn go_to_page(&mut self, page: usize) {
@@ -110,7 +115,8 @@ impl Viewer {
     pub fn ui(&mut self, root: &mut egui::Ui, open_requested: &mut bool) {
         self.render_worker.begin_frame();
         let ctx = root.ctx().clone();
-        if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::P)) {
+        if root.is_enabled() && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::P))
+        {
             if self.document.permissions().print {
                 self.printing.open = true;
             } else {
@@ -119,33 +125,85 @@ impl Viewer {
         }
         // Register the modal backdrop before the viewer and keep its keyboard
         // events out of global page, search, zoom and sidebar shortcuts.
-        let print_active = self.printing.open;
+        let print_active = self.printing.open && root.is_enabled();
         if print_active {
             self.printing.ui(&ctx, &self.document);
         }
         let print_input =
             print_active.then(|| ctx.input_mut(|input| std::mem::take(&mut input.events)));
-        let focus_page = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::G));
-        let focus_zoom = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::L));
-        if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F9)) {
+        let shortcuts = root.is_enabled() && !print_active;
+        let mut focus_page =
+            shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::G));
+        let mut focus_zoom =
+            shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::L));
+        if shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F9)) {
             self.sidebar.open = !self.sidebar.open;
         }
-        let mut focus_search = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::F));
+        let mut focus_search =
+            shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::F));
         if focus_search {
             self.search.open = true;
         }
-        if !self.printing.open
+        if shortcuts
             && self.search.open
+            && !ctx.memory(|memory| {
+                ["page_input", "zoom_input", "page_text"]
+                    .iter()
+                    .any(|id| memory.had_focus_last_frame(egui::Id::new(id)))
+            })
             && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
         {
             self.search.open = false;
             self.search.clear_results();
             ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("search_query")));
         }
-        if ctx.input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F3)) {
+        if shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F3)) {
             self.advance_match(true);
-        } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F3)) {
+        } else if shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F3)) {
             self.advance_match(false);
+        }
+        if shortcuts
+            && ctx
+                .input_mut(|input| input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::T))
+        {
+            self.page_text.toggle(&ctx);
+        }
+        if shortcuts {
+            let backwards = ctx.input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F6));
+            if backwards || ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F6)) {
+                let mut fields = vec![egui::Id::new("page_input"), egui::Id::new("zoom_input")];
+                if self.search.open {
+                    fields.push(egui::Id::new("search_query"));
+                }
+                if self.page_text.open {
+                    fields.push(egui::Id::new("page_text"));
+                }
+                let focused = ctx.memory(|memory| memory.focused());
+                let next = match fields.iter().position(|id| Some(*id) == focused) {
+                    Some(index) if backwards => (index + fields.len() - 1) % fields.len(),
+                    Some(index) => (index + 1) % fields.len(),
+                    None if backwards => fields.len() - 1,
+                    None => 0,
+                };
+                ctx.memory_mut(|memory| memory.request_focus(fields[next]));
+                ctx.request_repaint();
+                focus_page |= next == 0;
+                focus_zoom |= next == 1;
+                focus_search |= fields[next] == egui::Id::new("search_query");
+            }
+            ctx.input_mut(|input| {
+                if input.consume_key(Modifiers::COMMAND, Key::Plus)
+                    || input.consume_key(Modifiers::COMMAND, Key::Equals)
+                {
+                    self.change_zoom(1.25);
+                }
+                if input.consume_key(Modifiers::COMMAND, Key::Minus) {
+                    self.change_zoom(0.8);
+                }
+                if input.consume_key(Modifiers::COMMAND, Key::Num0) {
+                    self.zoom = Zoom::FitPage;
+                }
+            });
         }
         let enter_backwards = ctx.input(|input| input.events.iter().any(|event| matches!(
             event, egui::Event::Key { key: Key::Enter, pressed: true, modifiers, .. } if modifiers.shift
@@ -191,12 +249,14 @@ impl Viewer {
                     self.change_page(1);
                 }
                 ui.separator();
-                ui.label("Page");
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut self.page_input)
-                        .id_source("page_input")
-                        .desired_width(48.0),
-                );
+                let page_label = ui.label("Page");
+                let field = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.page_input)
+                            .id(egui::Id::new("page_input"))
+                            .desired_width(48.0),
+                    )
+                    .labelled_by(page_label.id);
                 if focus_page {
                     select_text(&ctx, &field, self.page_input.chars().count());
                 }
@@ -206,14 +266,19 @@ impl Viewer {
                 {
                     self.submit_page();
                 }
-                if (field.has_focus() || field.lost_focus())
+                if shortcuts
+                    && (field.has_focus() || field.lost_focus())
                     && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
                 {
                     field.surrender_focus();
                     self.go_to_page(self.document.current_page());
                 }
                 ui.separator();
-                if ui.button("−").clicked() {
+                let zoom_out = ui.button("−").on_hover_text("Zoom out");
+                zoom_out.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Zoom out")
+                });
+                if zoom_out.clicked() {
                     self.change_zoom(0.8);
                 }
                 let field = ui
@@ -223,6 +288,7 @@ impl Viewer {
                             .desired_width(44.0),
                     )
                     .on_hover_text("Zoom percentage (Ctrl+L / Cmd+L), 10–1600%");
+                ctx.accesskit_node_builder(field.id, |node| node.set_label("Zoom percentage"));
                 if focus_zoom {
                     select_text(&ctx, &field, self.zoom_input.chars().count());
                 }
@@ -238,7 +304,8 @@ impl Viewer {
                         None => self.error = Some("Enter a zoom from 10 to 1600%".into()),
                     }
                 }
-                if (field.has_focus() || field.lost_focus())
+                if shortcuts
+                    && (field.has_focus() || field.lost_focus())
                     && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
                 {
                     field.surrender_focus();
@@ -250,7 +317,11 @@ impl Viewer {
                         ctx.request_repaint();
                     }
                 }
-                if ui.button("+").clicked() {
+                let zoom_in = ui.button("+").on_hover_text("Zoom in");
+                zoom_in.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Zoom in")
+                });
+                if zoom_in.clicked() {
                     self.change_zoom(1.25);
                 }
                 if ui
@@ -289,6 +360,13 @@ impl Viewer {
                 {
                     self.printing.open = true;
                 }
+                if ui
+                    .selectable_label(self.page_text.open, "Page text")
+                    .on_hover_text("Read extracted page text (Ctrl+Shift+T / Cmd+Shift+T)")
+                    .clicked()
+                {
+                    self.page_text.toggle(&ctx);
+                }
             });
             let permissions = self.document.permissions();
             if !permissions.print || !permissions.print_high_quality || !permissions.copy {
@@ -305,20 +383,22 @@ impl Viewer {
                 ));
             }
             if let Some(error) = &self.error {
-                ui.colored_label(Color32::LIGHT_RED, error);
+                ui.colored_label(ui.visuals().error_fg_color, error);
             }
         });
 
         if self.search.open {
             egui::Panel::top("search_bar").show_inside(root, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Find");
-                    let field = ui.add(
-                        egui::TextEdit::singleline(&mut self.search.query)
-                            .id(egui::Id::new("search_query"))
-                            .desired_width(220.0)
-                            .hint_text("Search this document"),
-                    );
+                    let search_label = ui.label("Find");
+                    let field = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.search.query)
+                                .id(egui::Id::new("search_query"))
+                                .desired_width(220.0)
+                                .hint_text("Search this document"),
+                        )
+                        .labelled_by(search_label.id);
                     if field.changed() {
                         self.search.clear_results();
                     }
@@ -369,40 +449,54 @@ impl Viewer {
                     if ui.button("Close").clicked() {
                         self.search.open = false;
                         self.search.clear_results();
+                        field.surrender_focus();
                     }
                 });
             });
         }
 
-        // Let text fields consume Escape and settle focus before handling
-        // document shortcuts. egui clears focus at the start of an Escape frame.
-        self.selection.escape(&ctx);
-        if !self.printing.open && !ctx.egui_wants_keyboard_input() {
+        if shortcuts {
+            self.selection.escape(&ctx);
+        }
+        // Unmodified document keys must not steal arrows or editing keys from
+        // focused controls. Modified app commands are handled above.
+        if shortcuts && ctx.memory(|memory| memory.focused().is_none()) {
             let previous = (self.document.current_page(), self.zoom);
-            ctx.input(|input| {
-                if input.key_pressed(Key::ArrowLeft) || input.key_pressed(Key::PageUp) {
+            ctx.input_mut(|input| {
+                if input.consume_key(Modifiers::NONE, Key::ArrowLeft)
+                    || input.consume_key(Modifiers::NONE, Key::PageUp)
+                {
                     self.change_page(-1);
                 }
-                if input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::PageDown) {
+                if input.consume_key(Modifiers::NONE, Key::ArrowRight)
+                    || input.consume_key(Modifiers::NONE, Key::PageDown)
+                {
                     self.change_page(1);
                 }
-                if input.key_pressed(Key::Num1) {
+                if input.consume_key(Modifiers::NONE, Key::Home) {
+                    self.go_to_page(0);
+                }
+                if input.consume_key(Modifiers::NONE, Key::End) {
+                    self.go_to_page(self.document.page_count() - 1);
+                }
+                if input.consume_key(Modifiers::NONE, Key::Num1) {
                     self.zoom = Zoom::Percent(1.0);
                     self.effective_zoom = 1.0;
                 }
-                if input.key_pressed(Key::Plus) || input.key_pressed(Key::Equals) {
+                if input.consume_key(Modifiers::NONE, Key::Plus)
+                    || input.consume_key(Modifiers::NONE, Key::Equals)
+                {
                     self.change_zoom(1.25);
                 }
-                if input.key_pressed(Key::Minus) {
+                if input.consume_key(Modifiers::NONE, Key::Minus) {
                     self.change_zoom(0.8);
                 }
-                if input.key_pressed(Key::Num0) {
+                if input.consume_key(Modifiers::NONE, Key::Num0) {
                     self.zoom = Zoom::FitPage;
                 }
-                if input.key_pressed(Key::Num2) {
+                if input.consume_key(Modifiers::NONE, Key::Num2) {
                     self.zoom = Zoom::FitWidth;
                 }
-                self.quit = input.key_pressed(Key::Q) || input.key_pressed(Key::Escape);
             });
             if previous != (self.document.current_page(), self.zoom) {
                 self.error = None;
@@ -417,6 +511,7 @@ impl Viewer {
             self.go_to_page(page);
             ctx.request_repaint();
         }
+        self.page_text.ui(root, &self.document);
 
         egui::CentralPanel::default().show_inside(root, |ui| {
             let available = ui.available_size();
@@ -559,7 +654,7 @@ impl Viewer {
         if let Some(events) = print_input {
             ctx.input_mut(|input| input.events = events);
         }
-        if !print_active {
+        if !print_active && root.is_enabled() {
             self.printing.ui(&ctx, &self.document);
         }
     }
@@ -575,7 +670,10 @@ fn parse_page(input: &str, count: usize) -> Option<usize> {
 }
 
 fn select_text(ctx: &Context, response: &egui::Response, len: usize) {
-    response.request_focus();
+    if !response.has_focus() {
+        response.request_focus();
+    }
+    ctx.request_repaint();
     if let Some(mut state) = egui::TextEdit::load_state(ctx, response.id) {
         state
             .cursor
@@ -652,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_page_does_not_steal_field_copy_and_escape_clears_before_quitting() {
+    fn selected_page_does_not_steal_field_copy_and_escape_clears_selection() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             file.path(),
@@ -712,11 +810,18 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         };
         run(&mut viewer, vec![escape()]); // Field cancels.
-        assert!(!viewer.quit);
+        assert_eq!(viewer.zoom, crate::zoom::Zoom::FitPage);
         run(&mut viewer, vec![escape()]); // Selection clears.
-        assert!(!viewer.quit);
+        let output = run(&mut viewer, vec![egui::Event::Copy]);
+        assert!(
+            !output
+                .platform_output
+                .commands
+                .iter()
+                .any(|command| matches!(command, egui::OutputCommand::CopyText(_)))
+        );
         run(&mut viewer, vec![escape()]);
-        assert!(viewer.quit);
+        assert_eq!(viewer.document.current_page(), 0);
     }
 
     #[test]
@@ -762,7 +867,6 @@ mod tests {
             let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
         }
         assert_eq!(viewer.zoom, crate::zoom::Zoom::Percent(1.375));
-        assert!(!viewer.quit);
     }
 
     #[test]
@@ -795,7 +899,6 @@ mod tests {
             assert!(viewer.search.open);
             assert!(viewer.sidebar.open);
             assert_eq!(viewer.document.current_page(), 0);
-            assert!(!viewer.quit);
         }
     }
 
@@ -832,7 +935,6 @@ mod tests {
             let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
             assert_eq!(viewer.printing.open, allowed);
             assert_eq!(viewer.error.is_none(), allowed);
-            assert!(!viewer.quit);
         }
     }
 
@@ -861,7 +963,6 @@ mod tests {
                 ..Default::default()
             };
             let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
-            assert!(!viewer.quit);
             assert_eq!(viewer.page_input, expected);
             assert_eq!(viewer.document.current_page(), 0);
         }

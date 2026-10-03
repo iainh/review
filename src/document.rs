@@ -244,6 +244,10 @@ impl PdfDocument {
             .with_context(|| format!("failed to extract text from page {}", page_number + 1))
     }
 
+    pub fn page_text(&self, page_number: usize) -> Result<String> {
+        Ok(self.structured_text(page_number)?.plain_text())
+    }
+
     pub fn search_page(&self, page_number: usize, query: &str) -> Result<Vec<SearchMatch>> {
         ensure!(page_number < self.page_count, "page is out of range");
         if query.trim().is_empty() {
@@ -628,6 +632,19 @@ pub(crate) mod tests {
         assert_eq!(outline[0].down.len(), 1);
         assert_eq!(outline[0].down[0].title, "Nested chapter two");
         assert_eq!(outline[0].down[0].dest.unwrap().loc.page_number, 1);
+    }
+
+    #[test]
+    fn text_extraction_preserves_lines_and_does_not_change_pages() {
+        let document = sample_document();
+        assert_eq!(
+            document.page_text(0).unwrap().trim(),
+            "Alpha alpha\nNeedle\nphrase"
+        );
+        assert_eq!(document.page_text(1).unwrap().trim(), "Last alpha");
+        assert_eq!(document.current_page(), 0);
+        assert!(document.page_text(2).is_err());
+        assert!(sample_with_text("").page_text(0).unwrap().trim().is_empty());
     }
 
     #[test]

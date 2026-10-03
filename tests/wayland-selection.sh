@@ -15,6 +15,7 @@ wayland-scanner private-code "$scratch/virtual-pointer.xml" "$scratch/virtual-po
 cc -Wall -Wextra -Werror -I"$scratch" tests/wayland-pointer.c "$scratch/virtual-pointer.c" \
     $(pkg-config --cflags --libs wayland-client) -o "$scratch/pointer"
 binary=$(realpath target/debug/review)
+geometry=$(realpath tests/pdf-page-geometry.py)
 
 title() {
     swaymsg -t get_tree | jq -r '.. | objects | select(.app_id? == "review") | .name'
@@ -35,6 +36,38 @@ open_pdf() {
     done
     [[ $(title) == "Review — $1.pdf — 1/2 — Fit page" ]]
     sleep .7
+    page_geometry
+}
+page_geometry() {
+    rm -f "$scratch/page.json"
+    swaymsg "exec /usr/bin/python3 '$geometry' '$scratch/page.json' 'PDF page 1' > '$scratch/geometry.log' 2>&1" >/dev/null
+    for _ in {1..100}; do
+        [[ -f "$scratch/page.json" ]] && return
+        sleep .1
+    done
+    cat "$scratch/geometry.log" >&2
+    exit 1
+}
+point() {
+    # The fixture MediaBox is 300×400 PDF points with a nonzero origin.
+    /usr/bin/python3 - "$scratch/page.json" "$1" "$2" <<'PY'
+import json, sys
+x, y, width, height = json.load(open(sys.argv[1]))
+print(round(x + float(sys.argv[2]) * width / 300),
+      round(y + float(sys.argv[3]) * height / 400))
+PY
+}
+pointer() {
+    local action=$1 x y end_x end_y
+    read -r x y < <(point "$2" "$3")
+    if [[ $# == 5 ]]; then
+        read -r end_x end_y < <(point "$4" "$5")
+        "$scratch/pointer" "$action" "$x" "$y" "$end_x" "$end_y"
+    elif [[ ${4:-} == copy ]]; then
+        "$scratch/pointer" "$action" "$x" "$y" "$((x + 24))" "$((y + 17))"
+    else
+        "$scratch/pointer" "$action" "$x" "$y"
+    fi
 }
 command_key() { wtype -s 150 -M ctrl -k "$1" -m ctrl -s 150; }
 copy() { command_key c; }
@@ -65,30 +98,30 @@ command_key a
 copy
 expect_clipboard $'Left first\nLeft second\n\nRight first\nRight second\n\nRotated'
 capture selection-all
-"$scratch/pointer" drag 513 180 619 180
+pointer drag 31 64 82 64
 copy
 expect_clipboard 'Left firs'
-"$scratch/pointer" drag 619 180 513 180
+pointer drag 82 64 31 64
 copy
 expect_clipboard 'Left firs'
 capture selection-drag
-"$scratch/pointer" double 540 180
+pointer double 43 64
 copy
 expect_clipboard Left
-"$scratch/pointer" triple 540 180
+pointer triple 43 64
 copy
 expect_clipboard $'Left first\nLeft second'
 capture selection-paragraph
-"$scratch/pointer" double 836 180
+pointer double 180 64
 # Physical keyboards persist. Keep a virtual keyboard alive during mouse-only
 # copy too: Wayland clipboard ownership needs a live keyboard focus serial.
 swaymsg 'exec wtype -s 150 -M shift -m shift -s 5000' >/dev/null
 sleep .3
-"$scratch/pointer" right 836 180 860 197
+pointer right 180 64 copy
 expect_clipboard Right
-"$scratch/pointer" right 836 180
+pointer right 180 64
 capture selection-context
-"$scratch/pointer" drag 542 603 542 490
+pointer drag 44 280 44 205
 copy
 expect_clipboard Rotated
 capture selection-rotated
@@ -124,10 +157,10 @@ wl-copy 'permission sentinel'
 command_key a
 copy
 expect_clipboard 'permission sentinel'
-"$scratch/pointer" double 540 200
+pointer double 43 64
 copy
 expect_clipboard 'permission sentinel'
-"$scratch/pointer" right 540 200
+pointer right 43 64
 capture selection-denied
 expect_clipboard 'permission sentinel'
 echo 'PASS: copy-restricted PDF blocks keyboard, pointer selection and context-menu copy'

@@ -3,6 +3,8 @@
 mod document;
 #[cfg(target_os = "macos")]
 mod macos;
+mod native_ui;
+mod page_text;
 mod printing;
 mod render_worker;
 mod renderer;
@@ -22,7 +24,7 @@ use viewer::Viewer;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     window::{Window, WindowId},
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -34,6 +36,19 @@ struct PasswordPrompt {
     focus: bool,
 }
 
+#[derive(Debug)]
+enum AppEvent {
+    #[cfg(target_os = "macos")]
+    OpenFile(PathBuf),
+    AccessKit(egui_winit::accesskit_winit::Event),
+}
+
+impl From<egui_winit::accesskit_winit::Event> for AppEvent {
+    fn from(event: egui_winit::accesskit_winit::Event) -> Self {
+        Self::AccessKit(event)
+    }
+}
+
 struct App {
     viewer: Option<Viewer>,
     open_error: Option<String>,
@@ -41,6 +56,8 @@ struct App {
     renderer: Option<Renderer>,
     repaint_at: Option<Instant>,
     fatal_error: Option<anyhow::Error>,
+    proxy: Option<EventLoopProxy<AppEvent>>,
+    native_ui: native_ui::NativeUi,
 }
 
 impl App {
@@ -52,6 +69,8 @@ impl App {
             renderer: None,
             repaint_at: None,
             fatal_error: None,
+            proxy: None,
+            native_ui: native_ui::NativeUi::default(),
         }
     }
 
@@ -98,11 +117,21 @@ impl App {
     }
 }
 
-impl ApplicationHandler<PathBuf> for App {
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, path: PathBuf) {
-        self.open(path);
-        if let Some(renderer) = &self.renderer {
-            renderer.window().focus_window();
+impl ApplicationHandler<AppEvent> for App {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
+        match event {
+            #[cfg(target_os = "macos")]
+            AppEvent::OpenFile(path) => {
+                self.open(path);
+                if let Some(renderer) = &self.renderer {
+                    renderer.window().focus_window();
+                }
+            }
+            AppEvent::AccessKit(event) => {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.on_accesskit_event(event);
+                }
+            }
         }
     }
 
@@ -112,6 +141,7 @@ impl ApplicationHandler<PathBuf> for App {
         }
         let attributes = Window::default_attributes()
             .with_title("Review")
+            .with_visible(false)
             .with_inner_size(winit::dpi::LogicalSize::new(960, 720));
         #[cfg(target_os = "linux")]
         let attributes = {
@@ -127,7 +157,12 @@ impl ApplicationHandler<PathBuf> for App {
                     .create_window(attributes)
                     .context("failed to create window")?,
             );
-            pollster::block_on(Renderer::new(window)).context("failed to initialize graphics")
+            pollster::block_on(Renderer::new(
+                window,
+                event_loop,
+                self.proxy.clone().unwrap(),
+            ))
+            .context("failed to initialize graphics")
         })();
         match renderer {
             Ok(renderer) => {
@@ -163,22 +198,29 @@ impl ApplicationHandler<PathBuf> for App {
                 let mut open_requested = false;
                 let mut quit = false;
                 let mut submit_password = false;
-                let output = renderer.context.run_ui(input, |ui| {
+                let mut output = renderer.context.run_ui(input, |ui| {
                     (open_requested, quit, submit_password) = app_ui(
                         &mut self.viewer,
                         &mut self.open_error,
                         &mut self.password_prompt,
                         ui,
+                        &mut self.native_ui,
                     );
                 });
                 let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
                 self.repaint_at = Instant::now().checked_add(delay);
-                renderer.window().set_title(
-                    &self
-                        .viewer
-                        .as_ref()
-                        .map_or_else(|| "Review".into(), Viewer::title),
-                );
+                let title = self
+                    .viewer
+                    .as_ref()
+                    .map_or_else(|| "Review".into(), Viewer::title);
+                renderer.window().set_title(&title);
+                if let Some(update) = &mut output.platform_output.accesskit_update
+                    && let Some(tree) = &update.tree
+                    && let Some((_, root)) =
+                        update.nodes.iter_mut().find(|(id, _)| *id == tree.root)
+                {
+                    root.set_label(title);
+                }
                 if let Err(error) = renderer.render(output) {
                     eprintln!("failed to draw frame: {error:#}");
                 }
@@ -240,6 +282,7 @@ fn app_ui(
     open_error: &mut Option<String>,
     password_prompt: &mut Option<PasswordPrompt>,
     root: &mut egui::Ui,
+    native_ui: &mut native_ui::NativeUi,
 ) -> (bool, bool, bool) {
     let ctx = root.ctx().clone();
     // Draw the modal first so its backdrop blocks pointer input immediately.
@@ -261,7 +304,7 @@ fn app_ui(
             );
             ui.label("Enter the password to open this PDF.");
             ui.add_space(8.0);
-            ui.label("Password");
+            let password_label = ui.label("Password");
             let mut edit = egui::TextEdit::singleline(&mut *prompt.input)
                 .id(egui::Id::new("pdf_password"))
                 .password(true)
@@ -270,13 +313,16 @@ fn app_ui(
             // Password fields must not retain plaintext undo history in egui.
             edit.state.clear_undoer();
             edit.state.store(&ctx, edit.response.id);
-            let field = edit.response;
+            let field = edit.response.response.labelled_by(password_label.id);
             if prompt.focus {
                 field.request_focus();
                 prompt.focus = false;
             }
             if prompt.incorrect {
-                ui.colored_label(egui::Color32::LIGHT_RED, "Incorrect password. Try again.");
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    "Incorrect password. Try again.",
+                );
             }
             ui.label("Passwords are kept only in memory while the PDF is open.");
             ui.horizontal(|ui| {
@@ -292,15 +338,25 @@ fn app_ui(
     }
     let modal_input =
         password_active.then(|| ctx.input_mut(|input| std::mem::take(&mut input.events)));
-    let mut open_requested = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::O));
-    if open_error.is_some()
+    let quit = ctx.input_mut(|input| {
+        input.consume_key(Modifiers::COMMAND, Key::Q)
+            || input.consume_key(Modifiers::COMMAND, Key::W)
+    });
+    let blocked = native_ui.begin(root) || password_active;
+    let mut open_requested = !blocked
+        && !viewer.as_ref().is_some_and(Viewer::modal_open)
+        && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::O));
+    if !blocked
+        && open_error.is_some()
         && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
     {
         *open_error = None;
     }
-    let quit = if let Some(viewer) = viewer {
+    if blocked {
+        root.disable();
+    }
+    if let Some(viewer) = viewer {
         viewer.ui(root, &mut open_requested);
-        viewer.quit
     } else {
         egui::CentralPanel::default().show_inside(root, |ui| {
             ui.vertical_centered(|ui| {
@@ -313,8 +369,7 @@ fn app_ui(
                 ui.label("Ctrl+O / Cmd+O, or drop a PDF here");
             });
         });
-        ctx.input(|input| input.key_pressed(Key::Q) || input.key_pressed(Key::Escape))
-    };
+    }
     if let Some(error) = open_error.as_ref() {
         let mut dismiss = false;
         egui::Window::new("Cannot open PDF")
@@ -331,6 +386,9 @@ fn app_ui(
     }
     if let Some(events) = modal_input {
         ctx.input_mut(|input| input.events = events);
+    }
+    if !password_active {
+        native_ui.finish(&ctx);
     }
     (
         open_requested && !password_active,
@@ -378,12 +436,13 @@ fn main() -> Result<()> {
         );
         return Ok(());
     };
-    let event_loop = EventLoop::<PathBuf>::with_user_event()
+    let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .context("failed to create event loop")?;
     #[cfg(target_os = "macos")]
     let _open_documents = macos::OpenDocuments::install(event_loop.create_proxy());
     let mut app = App::new();
+    app.proxy = Some(event_loop.create_proxy());
     if let Some(path) = path {
         app.open(path);
     }
@@ -430,6 +489,7 @@ mod tests {
                     &mut app.open_error,
                     &mut app.password_prompt,
                     ui,
+                    &mut app.native_ui,
                 )
             },
         );
@@ -519,8 +579,23 @@ mod tests {
             focus: true,
         });
         let ctx = egui::Context::default();
+        ctx.enable_accesskit();
         password_frame(&mut app, &ctx, vec![]);
         let (_, output) = password_frame(&mut app, &ctx, vec![]);
+        let tree = output.platform_output.accesskit_update.as_ref().unwrap();
+        assert!(tree.nodes.iter().all(|(_, node)| {
+            !node
+                .value()
+                .is_some_and(|value| value.contains("sensitive-text"))
+        }));
+        let password = &tree
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == egui::Id::new("pdf_password").accesskit_id())
+            .unwrap()
+            .1;
+        assert_eq!(password.role(), egui::accesskit::Role::PasswordInput);
+        assert!(!password.labelled_by().is_empty());
         let drawn_text: Vec<_> = output
             .shapes
             .iter()
@@ -590,6 +665,203 @@ mod tests {
         );
     }
 
+    fn frame(
+        app: &mut App,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> ((bool, bool), egui::FullOutput) {
+        let (action, output) = password_frame(app, ctx, events);
+        ((action.0, action.1), output)
+    }
+
+    fn key(key: Key, modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            modifiers,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+        }
+    }
+
+    #[test]
+    fn help_blocks_document_commands_and_escape_never_quits() {
+        let mut app = App::new();
+        app.viewer = Some(Viewer::new(document::tests::sample_document()));
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![key(Key::G, Modifiers::COMMAND)]);
+        let page_focus = ctx.memory(|memory| memory.focused()).unwrap();
+        frame(&mut app, &ctx, vec![key(Key::F1, Modifiers::NONE)]);
+        assert!(app.native_ui.help_open);
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(page_focus));
+        assert_eq!(
+            frame(
+                &mut app,
+                &ctx,
+                vec![
+                    key(Key::O, Modifiers::COMMAND),
+                    key(Key::P, Modifiers::COMMAND),
+                    key(Key::ArrowRight, Modifiers::NONE)
+                ]
+            )
+            .0,
+            (false, false)
+        );
+        assert!(app.viewer.as_ref().unwrap().title().contains(" — 1/2 — "));
+        assert!(!app.viewer.as_ref().unwrap().modal_open());
+        assert_eq!(
+            frame(&mut app, &ctx, vec![key(Key::Escape, Modifiers::NONE)]).0,
+            (false, false)
+        );
+        assert!(!app.native_ui.help_open);
+        // A new frame lets the modal's focus filter release the restored field.
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(page_focus));
+        for key_code in [Key::Escape, Key::Q] {
+            assert_eq!(
+                frame(&mut app, &ctx, vec![key(key_code, Modifiers::NONE)]).0,
+                (false, false)
+            );
+        }
+        for key_code in [Key::Q, Key::W] {
+            assert_eq!(
+                frame(&mut app, &ctx, vec![key(key_code, Modifiers::COMMAND)]).0,
+                (false, true)
+            );
+        }
+    }
+
+    #[test]
+    fn print_modal_blocks_open_until_dismissed() {
+        let mut app = App::new();
+        app.viewer = Some(Viewer::new(document::tests::sample_document()));
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, vec![key(Key::P, Modifiers::COMMAND)]);
+        assert!(app.viewer.as_ref().unwrap().modal_open());
+        assert_eq!(
+            frame(&mut app, &ctx, vec![key(Key::O, Modifiers::COMMAND)]).0,
+            (false, false)
+        );
+        assert_eq!(
+            frame(&mut app, &ctx, vec![key(Key::Escape, Modifiers::NONE)]).0,
+            (false, false)
+        );
+        assert!(!app.viewer.as_ref().unwrap().modal_open());
+        assert_eq!(
+            frame(&mut app, &ctx, vec![key(Key::O, Modifiers::COMMAND)]).0,
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn fields_have_names_and_page_text_has_read_only_accessible_content() {
+        let mut app = App::new();
+        app.viewer = Some(Viewer::new(document::tests::sample_document()));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        frame(&mut app, &ctx, vec![key(Key::F, Modifiers::COMMAND)]);
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(Key::T, Modifiers::COMMAND | Modifiers::SHIFT)],
+        );
+        let (_, output) = frame(&mut app, &ctx, vec![]);
+        let tree = output.platform_output.accesskit_update.unwrap();
+        use egui::accesskit::Role;
+        for label in ["Zoom in", "Zoom out", "Page text", "Shortcut help"] {
+            assert!(
+                tree.nodes
+                    .iter()
+                    .any(|(_, node)| node.label() == Some(label)),
+                "{label}"
+            );
+        }
+        for (id, label) in [
+            (egui::Id::new("page_input"), "Page"),
+            (egui::Id::new("search_query"), "Find"),
+            (egui::Id::new("page_text"), "Page 1 text"),
+        ] {
+            let node = &tree
+                .nodes
+                .iter()
+                .find(|(node_id, _)| *node_id == id.accesskit_id())
+                .unwrap()
+                .1;
+            assert!(
+                node.labelled_by().iter().any(|label_id| tree
+                    .nodes
+                    .iter()
+                    .any(|(node_id, label_node)| node_id == label_id
+                        && label_node.value() == Some(label))),
+                "{label}"
+            );
+        }
+        let text_node = &tree
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == egui::Id::new("page_text").accesskit_id())
+            .unwrap()
+            .1;
+        assert_eq!(text_node.role(), Role::MultilineTextInput);
+        assert!(text_node.is_read_only());
+        let text: String = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == Role::TextRun)
+            .filter_map(|(_, node)| node.value())
+            .collect();
+        assert!(text.contains("Alpha alpha"));
+        assert!(text.contains("Needle"));
+        frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Text("not editable".into())],
+        );
+        let (_, output) = frame(&mut app, &ctx, vec![]);
+        assert!(
+            !output
+                .platform_output
+                .accesskit_update
+                .unwrap()
+                .nodes
+                .iter()
+                .any(|(_, node)| node
+                    .value()
+                    .is_some_and(|text| text.contains("not editable")))
+        );
+    }
+
+    #[test]
+    fn focus_cycle_is_bidirectional_and_arrows_do_not_turn_pages_in_fields() {
+        let mut app = App::new();
+        app.viewer = Some(Viewer::new(document::tests::sample_document()));
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![key(Key::F, Modifiers::COMMAND)]);
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(Key::T, Modifiers::COMMAND | Modifiers::SHIFT)],
+        );
+        for (key_code, modifiers, expected) in [
+            (Key::F6, Modifiers::NONE, "page_input"),
+            (Key::F6, Modifiers::NONE, "zoom_input"),
+            (Key::F6, Modifiers::NONE, "search_query"),
+            (Key::F6, Modifiers::NONE, "page_text"),
+            (Key::F6, Modifiers::SHIFT, "search_query"),
+        ] {
+            frame(&mut app, &ctx, vec![key(key_code, modifiers)]);
+            assert_eq!(
+                ctx.memory(|memory| memory.focused()),
+                Some(egui::Id::new(expected))
+            );
+            frame(&mut app, &ctx, vec![]); // requested repaint settles egui's focus lock
+            frame(&mut app, &ctx, vec![key(Key::ArrowRight, Modifiers::NONE)]);
+            assert!(app.viewer.as_ref().unwrap().title().contains(" — 1/2 — "));
+        }
+    }
+
     #[test]
     fn startup_accepts_empty_help_and_quoted_paths() {
         let parse = |args: &[&str]| parse_args(args.iter().map(OsString::from));
@@ -642,7 +914,8 @@ mod tests {
                     &mut app.viewer,
                     &mut app.open_error,
                     &mut app.password_prompt,
-                    ui
+                    ui,
+                    &mut app.native_ui,
                 ),
                 (false, false, false)
             );
@@ -676,6 +949,7 @@ mod tests {
                 &mut app.open_error,
                 &mut app.password_prompt,
                 ui,
+                &mut app.native_ui,
             );
         });
         assert!(app.viewer.as_ref().unwrap().title().ends_with("2/2 — 125%"));
@@ -711,7 +985,13 @@ mod tests {
             };
             let _ = egui::Context::default().run_ui(input, |ui| {
                 assert_eq!(
-                    app_ui(&mut viewer, &mut None, &mut None, ui),
+                    app_ui(
+                        &mut viewer,
+                        &mut None,
+                        &mut None,
+                        ui,
+                        &mut native_ui::NativeUi::default()
+                    ),
                     (true, false, false)
                 );
             });

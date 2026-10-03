@@ -8,6 +8,8 @@ use objc2_foundation::{
 };
 use winit::event_loop::EventLoopProxy;
 
+use crate::AppEvent;
+
 const CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
 const OPEN_DOCUMENTS: u32 = u32::from_be_bytes(*b"odoc");
 const DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
@@ -16,7 +18,7 @@ define_class!(
     // SAFETY: NSObject has no subclassing requirements; the class is main-thread-only.
     #[unsafe(super = NSObject)]
     #[thread_kind = MainThreadOnly]
-    #[ivars = EventLoopProxy<PathBuf>]
+    #[ivars = EventLoopProxy<AppEvent>]
     struct OpenDocumentsHandler;
 
     // SAFETY: NSObjectProtocol has no additional requirements.
@@ -36,7 +38,7 @@ define_class!(
                     continue;
                 };
                 if let Some(path) = url.path() {
-                    let _ = self.ivars().send_event(PathBuf::from(path.to_string()));
+                    let _ = self.ivars().send_event(AppEvent::OpenFile(PathBuf::from(path.to_string())));
                 }
             }
         }
@@ -49,7 +51,7 @@ pub struct OpenDocuments {
 
 impl OpenDocuments {
     /// Call after building the event loop and retain until it finishes.
-    pub fn install(proxy: EventLoopProxy<PathBuf>) -> Self {
+    pub fn install(proxy: EventLoopProxy<AppEvent>) -> Self {
         let mtm = MainThreadMarker::new().expect("the event loop runs on the main thread");
         // SAFETY: Initialize the allocated NSObject subclass after setting its ivars.
         let handler: Retained<OpenDocumentsHandler> = unsafe {

@@ -49,6 +49,16 @@ impl Selection {
             ui.id().with("text_selection"),
             Sense::click_and_drag(),
         );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Other,
+                ui.is_enabled(),
+                format!("PDF page {}", document.current_page() + 1),
+            )
+        });
+        ui.ctx().accesskit_node_builder(response.id, |node| {
+            node.set_role(egui::accesskit::Role::Image)
+        });
         let point = |position: egui::Pos2| {
             [
                 (position.x - page.min.x) / page.width(),

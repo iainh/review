@@ -36,8 +36,10 @@ for a filename that starts with a dash. Review displays one PDF at a time.
 
 Use **Left**/**Page Up** and **Right**/**Page Down** to change pages, **+** and
 **-** to zoom, **0** to fit the page, **1** for 100%, **2** to fit the width,
-and **Q** or **Escape** to quit when not editing a field. Zoomed pages can be
-scrolled horizontally and vertically. Use **Ctrl+L** (**Cmd+L** on macOS) to
+and **Home**/**End** for the first/last page when no control has focus. Click
+the page background to release focus. **Ctrl+Q**/**Ctrl+W** (**Cmd+Q**/**Cmd+W**
+on macOS) closes the window; **Escape** dismisses UI and never quits. Zoomed pages
+can be scrolled horizontally and vertically. Use **Ctrl+L** (**Cmd+L** on macOS) to
 enter a zoom from 10 to 1600%; **Enter** applies it and **Escape** cancels.
 Percentage zoom is independent of window size: 100% uses 96 logical pixels
 per inch for PDF points (72 per inch). Fit modes adapt to the viewport and
@@ -59,7 +61,7 @@ Drag across page text to select it, double-click a word or triple-click a
 paragraph. Use **Ctrl+A** (**Cmd+A** on macOS) to select all text on the
 displayed page, then **Ctrl+C** (**Cmd+C**) or right-click **Copy**. Selection
 is blue, survives zoom changes and clears on page changes. **Escape** clears
-selection before quitting. These shortcuts still edit text when a toolbar
+selection. These shortcuts still edit text when a toolbar
 field has focus. Copying requires the PDF's copy permission. Extraction uses
 MuPDF's column segmentation and Unicode text layer; complex layouts or PDFs
 without accurate Unicode mappings may not copy in the intended reading order.
@@ -100,6 +102,46 @@ lower resolution for unusually large page sizes to bound memory. macOS retains
 vector content when high-quality printing is permitted. These paths submit
 actual print jobs only after confirmation in the native dialog; they do not
 hand the PDF to another application.
+
+## Accessibility and appearance
+
+**Tab** and **Shift+Tab** move between controls. **Enter** or **Space** activates
+a focused button. **F6**/**Shift+F6** cycles the page, zoom, search and page-text
+fields that are present. Document navigation keys do not take arrows away from
+focused controls. **F1** or **Shortcut help** opens keyboard help, focuses its
+close button and restores previous focus on dismissal. Ctrl/Cmd zoom shortcuts
+work while a field has focus.
+
+**Appearance** offers **System**, **Light**, **Dark** and **High contrast**.
+System follows the light/dark theme reported by the OS, falling back to egui's
+dark theme when unavailable. High contrast is an explicit black-and-white UI
+with yellow focus/selection borders; winit does not report OS high-contrast mode.
+These choices affect controls, not PDF page colours, and last for the window's
+lifetime, including when opening another document. Preferences are not saved.
+
+Review connects egui's AccessKit tree to the native winit accessibility adapter
+(Windows UI Automation, macOS accessibility and Linux AT-SPI). Controls expose
+names, values, selection and focus; native actions are forwarded to egui.
+
+**Accessible controls do not make a raster PDF accessible.** Open **Page text**
+or press **Ctrl+Shift+T** (**Cmd+Shift+T** on macOS) to read the current page's
+extracted text in a labelled, read-only, selectable text control. It receives
+keyboard focus and exposes text and selection through AccessKit. Change pages
+with the page field or toolbar to read another page. Only the current page is
+exposed, not a continuous accessible document.
+
+Assistive reading stays available after authentication even when PDF copying
+is prohibited. Review follows the modern PDF policy that the legacy
+accessibility permission is always granted; it does not gate reading on the
+copy bit. The page-text pane suppresses clipboard copying for restricted PDFs
+and shows that restriction without hiding text from assistive technology.
+
+MuPDF extraction order is not guaranteed reading order. Columns, bidirectional
+text, tables, headings, links, figures and PDF tags are not reconstructed as an
+accessible semantic document. Scans without a text layer show an explicit
+no-text message; Review does not perform OCR. The raster page itself has no
+screen-reader text navigation. Linux AT-SPI text, focus and action integration
+are tested; VoiceOver, Narrator and NVDA need native-platform manual validation.
 
 ## Downloads
 
@@ -218,6 +260,21 @@ controls, cancellation and local PDF export in the same disposable Sway session.
 It requires GTK 3 and `python3-pyatspi` in addition to the tools below. It never
 activates the native Print button or submits a printer job. GTK's export action
 always exports all pages; range selection is checked through accessibility.
+
+`tests/accessibility.py` checks Review's own native AT-SPI tree, text, action
+forwarding, focus, help dismissal and appearance choices in the same disposable
+Sway session and D-Bus session. It requires `python3-pyatspi`, `gdbus`, `wtype`
+and `grim`. Build and export the synthetic fixture, then run:
+
+```sh
+cargo build
+REVIEW_FIXTURE_DIR=/tmp/review-fixtures cargo test export_wayland_fixture -- --ignored
+/usr/bin/python3 tests/accessibility.py target/debug/review /tmp/review-fixtures/outline.pdf
+```
+
+Create the fixture directory first. Pass an optional third argument to save
+screenshots. The test must share Sway's D-Bus session, for example through
+`swaymsg exec`, so the adapter and AT-SPI client share the accessibility bus.
 
 `bash tests/wayland.sh` exercises native keyboard and pointer input under Sway
 using the OpenID Connect handbook. It requires `swaymsg`, `wtype`, `grim`,

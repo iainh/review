@@ -1,7 +1,14 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use winit::{dpi::PhysicalSize, event::WindowEvent, window::Window};
+use winit::{
+    dpi::PhysicalSize,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, EventLoopProxy},
+    window::Window,
+};
+
+use crate::AppEvent;
 
 pub struct Renderer {
     window: Arc<Window>,
@@ -16,7 +23,11 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<Window>) -> Result<Self> {
+    pub async fn new(
+        window: Arc<Window>,
+        event_loop: &ActiveEventLoop,
+        proxy: EventLoopProxy<AppEvent>,
+    ) -> Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
         let surface = instance
@@ -56,7 +67,7 @@ impl Renderer {
         };
         surface.configure(&device, &config);
         let context = egui::Context::default();
-        context.set_visuals(egui::Visuals::dark());
+        context.set_theme(egui::ThemePreference::System);
         let repaint_window = Arc::downgrade(&window);
         context.set_request_repaint_callback(move |request| {
             // Delayed UI repaints are scheduled from FullOutput by App.
@@ -67,7 +78,7 @@ impl Renderer {
                 window.request_redraw();
             }
         });
-        let input = egui_winit::State::new(
+        let mut input = egui_winit::State::new(
             context.clone(),
             egui::ViewportId::ROOT,
             window.as_ref(),
@@ -75,6 +86,9 @@ impl Renderer {
             window.theme(),
             Some(device.limits().max_texture_dimension_2d as usize),
         );
+        // AccessKit must attach before the window is first made visible.
+        input.init_accesskit(event_loop, &window, proxy);
+        window.set_visible(true);
         let painter = egui_wgpu::Renderer::new(&device, format, Default::default());
 
         Ok(Self {
@@ -103,6 +117,21 @@ impl Renderer {
 
     pub fn take_input(&mut self) -> egui::RawInput {
         self.input.take_egui_input(&self.window)
+    }
+
+    pub fn on_accesskit_event(&mut self, event: egui_winit::accesskit_winit::Event) {
+        if event.window_id != self.window.id() {
+            return;
+        }
+        use egui_winit::accesskit_winit::WindowEvent;
+        match event.window_event {
+            WindowEvent::InitialTreeRequested => self.context.enable_accesskit(),
+            WindowEvent::ActionRequested(request) => {
+                self.input.on_accesskit_action_request(request);
+            }
+            WindowEvent::AccessibilityDeactivated => self.context.disable_accesskit(),
+        }
+        self.window.request_redraw();
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {

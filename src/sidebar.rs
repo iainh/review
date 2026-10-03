@@ -73,7 +73,7 @@ impl Sidebar {
                             });
                         }
                         Err(error) => {
-                            ui.colored_label(Color32::LIGHT_RED, error);
+                            ui.colored_label(ui.visuals().error_fg_color, error);
                         }
                     }
                 }
@@ -147,6 +147,14 @@ impl Sidebar {
                     Color32::TRANSPARENT
                 };
                 ui.painter().rect_filled(rect, 4.0, fill);
+                if response.has_focus() {
+                    ui.painter().rect_stroke(
+                        rect.shrink(1.0),
+                        4.0,
+                        ui.visuals().selection.stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                }
                 match self.thumbnails.get(&page) {
                     Some(Ok(texture)) => {
                         let original = texture.size_vec2();
@@ -231,15 +239,30 @@ fn outline_rows(
                 label(ui);
             } else {
                 let id = ui.make_persistent_id("outline_entry");
-                egui::collapsing_header::CollapsingState::load_with_default_open(
+                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
                     ui.ctx(),
                     id,
                     true,
-                )
-                .show_header(ui, label)
-                .body(|ui| {
+                );
+                let (toggle, _, _) = state.show_header(ui, label).body(|ui| {
                     outline_rows(ui, &entry.down, current, count, destination);
                 });
+                let open = egui::collapsing_header::CollapsingState::load(ui.ctx(), id)
+                    .unwrap()
+                    .is_open();
+                toggle.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::CollapsingHeader,
+                        ui.is_enabled(),
+                        format!(
+                            "{} {}",
+                            if open { "Collapse" } else { "Expand" },
+                            entry.title
+                        ),
+                    )
+                });
+                ui.ctx()
+                    .accesskit_node_builder(toggle.id, |node| node.set_expanded(open));
             }
         });
     }
