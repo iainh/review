@@ -5,7 +5,22 @@ set -euo pipefail
 : "${WAYLAND_DISPLAY:?Run this test in a Wayland Sway session}"
 : "${SWAYSOCK:?Set SWAYSOCK to the test Sway IPC socket}"
 scratch=$(mktemp -d)
-trap 'set +e; swaymsg "[app_id=\"^zenity$\"] kill" >/dev/null; swaymsg "[app_id=\"^review$\"] kill" >/dev/null; rm -rf "$scratch"' EXIT
+cleanup() {
+    set +e
+    swaymsg '[app_id="^zenity$"] kill' >/dev/null
+    # Sway's kill requests window close; it cannot bypass dirty confirmation.
+    if [[ -x $scratch/pointer ]] && declare -F title >/dev/null && [[ -n $(title) ]]; then
+        key Escape
+        command q
+        for _ in {1..16}; do
+            [[ -z $(title) ]] && break
+            "$scratch/pointer" click 570 479
+        done
+    fi
+    swaymsg '[app_id="^review$"] kill' >/dev/null
+    rm -rf "$scratch"
+}
+trap cleanup EXIT
 cargo build
 REVIEW_FIXTURE_DIR="$scratch" cargo test export_wayland_fixture -- --ignored
 cp "$scratch/outline.pdf" "$scratch/second résumé.pdf"
@@ -161,3 +176,69 @@ command w
 expect_title 'Review — tab14.pdf — 1/2 — Fit page'
 expect_state '(.session.files | length) == 15'
 echo 'PASS: over-limit session is bounded to 16, tab strip scrolls to selected document and last-tab close selects neighbour'
+quit
+
+# Edits are never stored in session metadata. Close prompts target the selected
+# document and window exit walks every dirty tab without dropping buffers early.
+REVIEW_FIXTURE_DIR="$scratch" cargo test export_annotation_fixture -- --ignored
+cp "$scratch/annotations.pdf" "$scratch/second-annotations.pdf"
+edit_note() {
+    local offset=$1 text=$2
+    "$scratch/pointer" click 48 "$((56 + offset))"
+    "$scratch/pointer" click 1090 "$((183 + offset))"
+    "$scratch/pointer" click 1140 "$((260 + offset))"
+    wtype -s 150 -M ctrl -k a -m ctrl -s 150 "$text" -s 150
+    "$scratch/pointer" click 1073 "$((333 + offset))"
+}
+launch annotations.pdf
+expect_title 'Review — annotations.pdf — 1/2 — Fit page'
+edit_note 0 'first unsaved tab'
+expect_title 'Review — annotations.pdf * — 1/2 — Fit page'
+choose second-annotations.pdf
+expect_title 'Review — second-annotations.pdf — 1/2 — Fit page'
+edit_note 22 'second unsaved tab'
+expect_title 'Review — second-annotations.pdf * — 1/2 — Fit page'
+capture dirty-two-documents
+command Tab
+expect_title 'Review — annotations.pdf * — 1/2 — Fit page'
+chmod 400 "$scratch/annotations.pdf"
+command w
+capture dirty-tab-close
+# Save fails against the read-only destination and retains this close target.
+"$scratch/pointer" click 447 479
+expect_title 'Review — annotations.pdf * — 1/2 — Fit page'
+capture dirty-save-failed
+key Escape
+expect_title 'Review — annotations.pdf * — 1/2 — Fit page'
+chmod 600 "$scratch/annotations.pdf"
+command Tab
+expect_title 'Review — second-annotations.pdf * — 1/2 — Fit page'
+command q
+expect_title 'Review — annotations.pdf * — 1/2 — Fit page'
+"$scratch/pointer" click 570 479 # Discard advances, without dropping this buffer.
+expect_title 'Review — second-annotations.pdf * — 1/2 — Fit page'
+capture dirty-window-queue
+key Escape
+command Tab
+expect_title 'Review — annotations.pdf * — 1/2 — Fit page'
+echo 'PASS: dirty window-exit queue cancellation retains every tab and discarded buffer'
+command w
+"$scratch/pointer" click 447 479 # Save succeeds, then closes only this tab.
+expect_title 'Review — second-annotations.pdf * — 1/2 — Fit page'
+expect_state '(.session.files | length) == 1 and (.session.files[0].path | endswith("second-annotations.pdf"))'
+command q
+"$scratch/pointer" click 570 479 # Discard the final dirty tab, then exit.
+for _ in {1..100}; do [[ -z $(title) ]] && break; sleep .1; done
+[[ -z $(title) ]]
+launch
+expect_title 'Review — second-annotations.pdf — 1/2 — Fit page'
+! grep -Eq 'first unsaved tab|second unsaved tab' "$state"
+echo 'PASS: failed-save retention, save-and-close identity, final dirty exit and metadata-only restart'
+quit
+launch annotations.pdf
+expect_title 'Review — annotations.pdf — 1/2 — Fit page'
+"$scratch/pointer" click 48 56
+capture dirty-saved-source
+quit
+REVIEW_FIXTURE_DIR="$scratch" cargo test verify_native_tab_close_output -- --ignored
+echo 'PASS: reopened first tab contains saved edit; discarded second tab retains its original note'

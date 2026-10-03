@@ -27,7 +27,7 @@ mod tabs;
 mod viewer;
 mod zoom;
 
-use std::{env, ffi::OsString, path::PathBuf, sync::Arc, time::Instant};
+use std::{collections::VecDeque, env, ffi::OsString, path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use egui::{Key, Modifiers};
@@ -63,8 +63,8 @@ impl From<egui_winit::accesskit_winit::Event> for AppEvent {
 }
 
 enum PendingAction {
-    Open(PathBuf, Option<persistence::ReadingState>),
-    Close,
+    CloseTab(u64),
+    CloseWindow(VecDeque<u64>),
 }
 
 #[derive(Clone, Copy)]
@@ -125,12 +125,9 @@ impl App {
     }
 
     fn open_with_reading(&mut self, path: PathBuf, reading: Option<persistence::ReadingState>) {
-        if self.viewer.as_ref().is_some_and(Viewer::is_dirty) {
-            self.pending = Some(PendingAction::Open(path, reading));
-            self.save_failed = false;
-            if let Some(renderer) = &self.renderer {
-                renderer.window().request_redraw();
-            }
+        // Opening adds a tab, retaining unsaved documents. Do not replace a
+        // pending close target when an OS open/drop arrives during confirmation.
+        if self.pending.is_some() {
             return;
         }
         self.open_unchecked(path, reading);
@@ -144,7 +141,10 @@ impl App {
             && self.tabs.select(id, &mut self.viewer)
         {
             self.session_cleared = false;
-            let viewer = self.viewer.as_ref().unwrap();
+            let viewer = self.viewer.as_mut().unwrap();
+            if let Some(reading) = &reading {
+                viewer.restore_reading(reading);
+            }
             self.store.state.opened(key, viewer.reading_state());
             self.tab_changed();
             return;
@@ -175,40 +175,61 @@ impl App {
     }
 
     fn request_close(&mut self, event_loop: &ActiveEventLoop) {
-        if self.viewer.as_ref().is_some_and(Viewer::is_dirty) {
-            self.pending = Some(PendingAction::Close);
-            self.save_failed = false;
-            if let Some(renderer) = &self.renderer {
-                renderer.window().request_redraw();
-            }
-        } else {
+        if self.begin_close() {
             event_loop.exit();
         }
     }
 
-    /// Return whether the caller should exit. A cancelled/failed save never
-    /// consumes the pending action or replaces the current document.
+    fn begin_close(&mut self) -> bool {
+        if self.pending.is_some() {
+            return false;
+        }
+        self.password_prompt = None;
+        self.capture_state();
+        let dirty: VecDeque<_> = self.tabs.dirty_ids(self.viewer.as_ref()).into();
+        let Some(&first) = dirty.front() else {
+            return true;
+        };
+        self.select_tab(first);
+        self.pending = Some(PendingAction::CloseWindow(dirty));
+        self.save_failed = false;
+        false
+    }
+
+    /// Return whether the caller should exit. Save failure retains the target.
+    /// Window-close decisions never drop documents until every prompt succeeds,
+    /// so cancelling a later prompt also retains earlier discarded buffers.
     fn resolve_unsaved(&mut self, decision: UnsavedDecision) -> bool {
+        let Some(pending) = self.pending.take() else {
+            return false;
+        };
+        self.save_failed = false;
         match decision {
-            UnsavedDecision::Cancel => {
-                self.pending = None;
-                return false;
-            }
+            UnsavedDecision::Cancel => return false,
             UnsavedDecision::Save(save_as) => {
                 if !self.save_current(save_as) {
+                    self.pending = Some(pending);
                     self.save_failed = true;
                     return false;
                 }
             }
             UnsavedDecision::Discard => {}
         }
-        match self.pending.take() {
-            Some(PendingAction::Close) => true,
-            Some(PendingAction::Open(path, reading)) => {
-                self.open_unchecked(path, reading);
+        match pending {
+            PendingAction::CloseTab(id) => {
+                self.close_tab_unchecked(id);
                 false
             }
-            None => false,
+            PendingAction::CloseWindow(mut remaining) => {
+                remaining.pop_front();
+                if let Some(&next) = remaining.front() {
+                    self.select_tab(next);
+                    self.pending = Some(PendingAction::CloseWindow(remaining));
+                    false
+                } else {
+                    true
+                }
+            }
         }
     }
 
@@ -280,6 +301,19 @@ impl App {
     }
 
     fn close_tab(&mut self, id: u64) {
+        if self.pending.is_some() {
+            return;
+        }
+        if self.tabs.is_dirty(id, self.viewer.as_ref()) {
+            self.select_tab(id);
+            self.pending = Some(PendingAction::CloseTab(id));
+            self.save_failed = false;
+        } else {
+            self.close_tab_unchecked(id);
+        }
+    }
+
+    fn close_tab_unchecked(&mut self, id: u64) {
         self.capture_state();
         if let Some(neighbour) = self.tabs.close(id, &mut self.viewer) {
             self.select_tab(neighbour);
@@ -308,15 +342,29 @@ impl App {
 
     fn save_current(&mut self, save_as: bool) -> bool {
         self.capture_state();
+        let session = self.tabs.session();
+        let open_paths: Vec<_> = session
+            .files
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| *index != session.active)
+            .map(|(_, file)| file.path)
+            .collect();
         let Some(viewer) = &mut self.viewer else {
             return false;
         };
-        if !viewer.save(save_as) {
+        let saved = if open_paths.is_empty() {
+            viewer.save(save_as)
+        } else {
+            viewer.save_with_open_paths(save_as, &open_paths)
+        };
+        if !saved {
             return false;
         }
         self.store
             .state
             .opened(viewer.state_key().to_path_buf(), viewer.reading_state());
+        self.capture_state();
         true
     }
 
@@ -492,7 +540,7 @@ impl ApplicationHandler<AppEvent> for App {
                             self.viewer.as_ref(),
                             library_enabled,
                         );
-                        tab_action = self.tabs.ui(ui, library_enabled, self.viewer.is_some());
+                        tab_action = self.tabs.ui(ui, library_enabled, self.viewer.as_ref());
                         let id = self.tabs.active_id().unwrap_or(0);
                         ui.push_id(("document", id), |ui| {
                             (open_requested, quit, submit_password) = app_ui(
@@ -841,7 +889,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Startup> {
         first
     };
     if args.next().is_some() {
-        bail!("Review opens one PDF at a time");
+        bail!("expected at most one startup PDF; open additional documents in the window");
     }
     Ok(Startup::Open(Some(path.into())))
 }
@@ -879,7 +927,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dirty_document_open_and_close_require_a_successful_save_or_discard() {
+    #[ignore = "reopens native tab-close output from REVIEW_FIXTURE_DIR"]
+    fn verify_native_tab_close_output() {
+        let directory = PathBuf::from(env::var_os("REVIEW_FIXTURE_DIR").unwrap());
+        for (name, contents) in [
+            ("annotations.pdf", "first unsaved tab"),
+            ("second-annotations.pdf", "Existing note"),
+        ] {
+            let document = document::PdfDocument::open(directory.join(name)).unwrap();
+            let annotations = document.annotations(0).unwrap();
+            assert_eq!(annotations.len(), 1);
+            assert_eq!(annotations[0].contents, contents);
+        }
+    }
+
+    #[test]
+    fn dirty_inactive_tab_close_requires_a_successful_save_or_discard() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.pdf");
         let replacement = directory.path().join("replacement.pdf");
@@ -899,12 +962,17 @@ mod tests {
         let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
         app.viewer = Some(Viewer::new(document));
         app.open(replacement.clone());
-        assert!(matches!(app.pending, Some(PendingAction::Open(..))));
+        assert!(app.pending.is_none());
+        assert_eq!(app.tabs.len(), 2);
+        let source_id = app.tabs.find(&source).unwrap();
+        app.close_tab(source_id);
+        assert!(matches!(app.pending, Some(PendingAction::CloseTab(id)) if id == source_id));
         assert_eq!(app.viewer.as_ref().unwrap().path(), source);
         assert!(!app.resolve_unsaved(UnsavedDecision::Cancel));
         assert!(app.pending.is_none());
         assert!(app.viewer.as_ref().unwrap().is_dirty());
         app.open(replacement.clone());
+        app.close_tab(source_id);
         let original_permissions = std::fs::metadata(&source).unwrap().permissions();
         let mut permissions = original_permissions.clone();
         permissions.set_readonly(true);
@@ -916,6 +984,7 @@ mod tests {
         std::fs::set_permissions(&source, original_permissions).unwrap();
         assert!(!app.resolve_unsaved(UnsavedDecision::Save(false)));
         assert_eq!(app.viewer.as_ref().unwrap().path(), replacement);
+        assert_eq!(app.tabs.len(), 1);
         assert_eq!(
             document::PdfDocument::open(&source)
                 .unwrap()
@@ -924,14 +993,11 @@ mod tests {
                 .contents,
             "keep this"
         );
-        app.pending = Some(PendingAction::Close);
-        assert!(!app.resolve_unsaved(UnsavedDecision::Cancel));
-        app.pending = Some(PendingAction::Close);
-        assert!(app.resolve_unsaved(UnsavedDecision::Discard));
+        assert!(app.begin_close());
     }
 
     #[test]
-    fn dirty_bookmark_replacement_preserves_destination_through_confirmation_and_password() {
+    fn dirty_bookmark_open_keeps_source_and_destination_through_password() {
         for encrypted in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let source = directory.path().join("source.pdf");
@@ -971,13 +1037,10 @@ mod tests {
                 reading: reading.clone(),
             };
             app.open_bookmark(bookmark.clone());
-            assert!(matches!(app.pending, Some(PendingAction::Open(_, Some(_)))));
-            assert_eq!(app.viewer.as_ref().unwrap().path(), source);
-            app.resolve_unsaved(UnsavedDecision::Cancel);
-            assert!(app.viewer.as_ref().unwrap().is_dirty());
-            app.open_bookmark(bookmark);
-            assert!(!app.resolve_unsaved(UnsavedDecision::Discard));
+            assert!(app.pending.is_none());
             if encrypted {
+                assert_eq!(app.viewer.as_ref().unwrap().path(), source);
+                assert!(app.viewer.as_ref().unwrap().is_dirty());
                 assert_eq!(
                     app.password_prompt.as_ref().unwrap().reading.as_ref(),
                     Some(&reading)
@@ -992,12 +1055,88 @@ mod tests {
             let viewer = app.viewer.as_ref().unwrap();
             assert_eq!(viewer.path(), target);
             assert_eq!(viewer.reading_state(), reading);
+            app.select_tab(app.tabs.find(&source).unwrap());
+            assert!(app.viewer.as_ref().unwrap().is_dirty());
+            // A bookmark for a live inactive tab must apply its destination,
+            // rather than just focusing that tab's last reading position.
+            let mut bookmark = bookmark;
+            bookmark.reading.page = 0;
+            app.open_bookmark(bookmark.clone());
+            assert_eq!(
+                app.viewer.as_ref().unwrap().reading_state(),
+                bookmark.reading
+            );
             assert!(
                 document::PdfDocument::open(&source)
                     .unwrap()
                     .annotations(0)
                     .unwrap()
                     .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn window_close_queue_preserves_discarded_buffers_on_cancel_and_saves_each_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
+        let mut ids = Vec::new();
+        for name in ["first.pdf", "clean.pdf", "last.pdf"] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, document::tests::sample_pdf("", false)).unwrap();
+            let mut document = document::PdfDocument::open(&path).unwrap();
+            if name != "clean.pdf" {
+                document
+                    .add_annotation(
+                        0,
+                        annotations::Kind::Note,
+                        annotations::Geometry::Note([0.2, 0.7]),
+                        name,
+                        [0.8, 0.3, 0.1],
+                        2.0,
+                    )
+                    .unwrap();
+            }
+            app.finish_open(document, None);
+            ids.push(app.tabs.active_id().unwrap());
+        }
+        app.password_prompt = Some(PasswordPrompt {
+            path: directory.path().join("locked.pdf"),
+            input: Zeroizing::new("session-only".into()),
+            incorrect: false,
+            focus: true,
+            reading: None,
+        });
+        assert!(!app.begin_close());
+        assert!(app.password_prompt.is_none());
+        assert_eq!(app.tabs.active_id(), Some(ids[0]));
+        assert!(!app.begin_close()); // repeated native close cannot reset the queue
+        app.open(directory.path().join("ignored-open.pdf"));
+        app.close_tab(ids[1]);
+        assert_eq!(app.tabs.len(), 3);
+        assert!(!app.resolve_unsaved(UnsavedDecision::Discard));
+        assert_eq!(app.tabs.active_id(), Some(ids[2]));
+        assert!(!app.resolve_unsaved(UnsavedDecision::Cancel));
+        assert!(app.pending.is_none());
+        assert_eq!(
+            app.tabs.dirty_ids(app.viewer.as_ref()),
+            vec![ids[0], ids[2]]
+        );
+        assert_eq!(app.tabs.len(), 3);
+        assert!(!app.begin_close());
+        assert!(!app.resolve_unsaved(UnsavedDecision::Save(false)));
+        assert_eq!(app.tabs.active_id(), Some(ids[2]));
+        assert_eq!(app.tabs.dirty_ids(app.viewer.as_ref()), vec![ids[2]]);
+        assert!(app.resolve_unsaved(UnsavedDecision::Save(false)));
+        assert!(app.tabs.dirty_ids(app.viewer.as_ref()).is_empty());
+        for name in ["first.pdf", "last.pdf"] {
+            assert_eq!(
+                document::PdfDocument::open(directory.path().join(name))
+                    .unwrap()
+                    .annotations(0)
+                    .unwrap()[0]
+                    .contents,
+                name
             );
         }
     }
@@ -1325,10 +1464,11 @@ mod tests {
                 "{label}"
             );
         }
+        let viewer = app.viewer.as_ref().unwrap();
         for (id, label) in [
-            (egui::Id::new("page_input"), "Page"),
-            (egui::Id::new("search_query"), "Find"),
-            (egui::Id::new("page_text"), "Page 1 text"),
+            (viewer.field_id("page_input"), "Page"),
+            (viewer.field_id("search_query"), "Find"),
+            (viewer.field_id("page_text"), "Page 1 text"),
         ] {
             let node = &tree
                 .nodes
@@ -1348,7 +1488,7 @@ mod tests {
         let text_node = &tree
             .nodes
             .iter()
-            .find(|(id, _)| *id == egui::Id::new("page_text").accesskit_id())
+            .find(|(id, _)| *id == viewer.field_id("page_text").accesskit_id())
             .unwrap()
             .1;
         assert_eq!(text_node.role(), Role::MultilineTextInput);
@@ -1402,7 +1542,7 @@ mod tests {
             frame(&mut app, &ctx, vec![key(key_code, modifiers)]);
             assert_eq!(
                 ctx.memory(|memory| memory.focused()),
-                Some(egui::Id::new(expected))
+                Some(app.viewer.as_ref().unwrap().field_id(expected))
             );
             frame(&mut app, &ctx, vec![]); // requested repaint settles egui's focus lock
             frame(&mut app, &ctx, vec![key(Key::ArrowRight, Modifiers::NONE)]);

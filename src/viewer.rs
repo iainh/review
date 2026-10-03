@@ -27,6 +27,7 @@ pub struct Viewer {
     effective_zoom: f32,
     zoom_input: String,
     page_input: String,
+    fields_id: egui::Id,
     error: Option<String>,
     reading: ReadingSurface,
     render_worker: RenderWorker,
@@ -68,6 +69,7 @@ impl Viewer {
             effective_zoom: 1.0,
             zoom_input: "100".into(),
             page_input: "1".into(),
+            fields_id: egui::Id::new("viewer_fields"),
             error: None,
             reading: ReadingSurface::default(),
             render_worker,
@@ -119,6 +121,14 @@ impl Viewer {
     }
 
     pub fn save(&mut self, save_as: bool) -> bool {
+        self.save_with_open_paths(save_as, &[])
+    }
+
+    pub fn save_with_open_paths(
+        &mut self,
+        save_as: bool,
+        open_paths: &[std::path::PathBuf],
+    ) -> bool {
         let path = if save_as {
             let mut chooser = rfd::FileDialog::new()
                 .set_title("Save PDF As")
@@ -134,7 +144,19 @@ impl Viewer {
         } else {
             self.path().to_path_buf()
         };
-        match self.document.save(&path) {
+        self.save_to(&path, open_paths)
+    }
+
+    fn save_to(&mut self, path: &std::path::Path, open_paths: &[std::path::PathBuf]) -> bool {
+        let key = crate::persistence::file_key(path);
+        if open_paths
+            .iter()
+            .any(|other| crate::persistence::file_key(other) == key)
+        {
+            self.error = Some("That PDF is already open in another tab. Close that tab or choose another destination.".into());
+            return false;
+        }
+        match self.document.save(path) {
             Ok(()) => {
                 let key = crate::persistence::file_key(self.path());
                 if self.state_key != key {
@@ -331,7 +353,17 @@ impl Viewer {
         }
     }
 
+    pub fn field_id(&self, name: &str) -> egui::Id {
+        self.fields_id.with(name)
+    }
+
     pub fn ui(&mut self, root: &mut egui::Ui, open_requested: &mut bool) {
+        self.fields_id = root.make_persistent_id("viewer_fields");
+        let page_input_id = self.field_id("page_input");
+        let zoom_input_id = self.field_id("zoom_input");
+        let search_query_id = self.field_id("search_query");
+        let page_text_id = self.field_id("page_text");
+        self.page_text.field_id = Some(page_text_id);
         self.render_worker.begin_frame();
         self.ocr.poll(&self.document);
         if self.text_revision != self.document.text_revision() {
@@ -423,15 +455,15 @@ impl Viewer {
         if shortcuts
             && self.search.open
             && !ctx.memory(|memory| {
-                ["page_input", "zoom_input", "page_text"]
+                [page_input_id, zoom_input_id, page_text_id]
                     .iter()
-                    .any(|id| memory.had_focus_last_frame(egui::Id::new(id)))
+                    .any(|id| memory.had_focus_last_frame(*id))
             })
             && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
         {
             self.search.open = false;
             self.search.clear_results();
-            ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("search_query")));
+            ctx.memory_mut(|memory| memory.surrender_focus(search_query_id));
         }
         self.search.refresh_text(&self.document, &ctx);
         if shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F3)) {
@@ -448,12 +480,12 @@ impl Viewer {
         if shortcuts {
             let backwards = ctx.input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F6));
             if backwards || ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F6)) {
-                let mut fields = vec![egui::Id::new("page_input"), egui::Id::new("zoom_input")];
+                let mut fields = vec![page_input_id, zoom_input_id];
                 if self.search.open {
-                    fields.push(egui::Id::new("search_query"));
+                    fields.push(search_query_id);
                 }
                 if self.page_text.open {
-                    fields.push(egui::Id::new("page_text"));
+                    fields.push(page_text_id);
                 }
                 fields.extend(self.forms.focus_ids());
                 let focused = ctx.memory(|memory| memory.focused());
@@ -467,7 +499,7 @@ impl Viewer {
                 ctx.request_repaint();
                 focus_page |= next == 0;
                 focus_zoom |= next == 1;
-                focus_search |= fields[next] == egui::Id::new("search_query");
+                focus_search |= fields[next] == search_query_id;
             }
             ctx.input_mut(|input| {
                 if input.consume_key(Modifiers::COMMAND, Key::Plus)
@@ -520,7 +552,7 @@ impl Viewer {
                 let field = ui
                     .add(
                         egui::TextEdit::singleline(&mut self.page_input)
-                            .id(egui::Id::new("page_input"))
+                            .id(page_input_id)
                             .desired_width(48.0),
                     )
                     .labelled_by(page_label.id)
@@ -556,7 +588,7 @@ impl Viewer {
                 let field = ui
                     .add(
                         egui::TextEdit::singleline(&mut self.zoom_input)
-                            .id(egui::Id::new("zoom_input"))
+                            .id(zoom_input_id)
                             .desired_width(44.0),
                     )
                     .on_hover_text("Zoom percentage (Ctrl+L / Cmd+L), 10–1600%");
@@ -740,7 +772,7 @@ impl Viewer {
                     let field = ui
                         .add(
                             egui::TextEdit::singleline(&mut self.search.query)
-                                .id(egui::Id::new("search_query"))
+                                .id(search_query_id)
                                 .desired_width(220.0)
                                 .hint_text("Search this document"),
                         )
@@ -1190,6 +1222,115 @@ mod tests {
                     .all(|hit| hit.page == 0 && hit.snippet == expected)
             );
         }
+    }
+
+    #[test]
+    fn save_as_rejects_another_open_path_and_preserves_dirty_identity() {
+        use crate::annotations::{Geometry, Kind};
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.pdf");
+        let other = directory.path().join("other.pdf");
+        let destination = directory.path().join("destination.pdf");
+        for path in [&source, &other] {
+            std::fs::write(path, crate::document::tests::sample_pdf("", false)).unwrap();
+        }
+        let mut document = crate::document::PdfDocument::open(&source).unwrap();
+        document
+            .add_annotation(
+                0,
+                Kind::Note,
+                Geometry::Note([0.2, 0.7]),
+                "keep this",
+                [0.9, 0.3, 0.1],
+                2.0,
+            )
+            .unwrap();
+        let mut viewer = Viewer::new(document);
+        let original = std::fs::read(&other).unwrap();
+        let alias = directory.path().join(".").join("other.pdf");
+        assert!(!viewer.save_to(&alias, std::slice::from_ref(&other)));
+        assert_eq!(std::fs::read(&other).unwrap(), original);
+        assert_eq!(viewer.path(), source);
+        assert_eq!(viewer.state_key(), source);
+        assert!(viewer.is_dirty());
+        assert!(viewer.save_to(&destination, &[other]));
+        assert_eq!(viewer.path(), destination);
+        assert_eq!(viewer.state_key(), destination);
+        assert!(!viewer.is_dirty());
+        assert_eq!(
+            crate::document::PdfDocument::open(destination)
+                .unwrap()
+                .annotations(0)
+                .unwrap()[0]
+                .contents,
+            "keep this"
+        );
+    }
+
+    #[test]
+    fn tab_fields_keep_independent_focus_ids_and_text_undo_history() {
+        use egui::{Key, Modifiers};
+        let mut first = Viewer::new(crate::document::tests::sample_document());
+        let mut second = Viewer::new(crate::document::tests::sample_document());
+        let ctx = egui::Context::default();
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            modifiers: Modifiers::COMMAND,
+            pressed: true,
+            repeat: false,
+        };
+        let mut time = 0.0;
+        let mut draw = |viewer: &mut Viewer, tab: u64, events| {
+            time += 1.0;
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(960.0, 720.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.push_id(("document", tab), |ui| viewer.ui(ui, &mut false));
+                },
+            );
+        };
+        draw(&mut first, 1, vec![key(Key::F)]);
+        draw(&mut first, 1, vec![egui::Event::Text("first query".into())]);
+        draw(&mut first, 1, vec![]);
+        draw(&mut second, 2, vec![key(Key::F)]);
+        draw(
+            &mut second,
+            2,
+            vec![egui::Event::Text("second query".into())],
+        );
+        draw(&mut second, 2, vec![]);
+        for name in ["page_input", "zoom_input", "search_query", "page_text"] {
+            assert_ne!(first.field_id(name), second.field_id(name));
+        }
+        assert_eq!(first.search.query, "first query");
+        assert_eq!(second.search.query, "second query");
+        let first_id = first.field_id("search_query");
+        draw(&mut second, 2, vec![key(Key::Z)]);
+        assert!(second.search.query.is_empty());
+        assert_eq!(first.search.query, "first query");
+        draw(&mut first, 1, vec![key(Key::F)]);
+        draw(&mut first, 1, vec![]);
+        assert_eq!(first.field_id("search_query"), first_id);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(first_id));
+        draw(
+            &mut first,
+            1,
+            vec![egui::Event::Text("changed first".into())],
+        );
+        assert_eq!(first.search.query, "changed first");
+        draw(&mut first, 1, vec![]);
+        draw(&mut first, 1, vec![key(Key::Z)]);
+        assert_eq!(first.search.query, "first query");
+        assert!(second.search.query.is_empty());
     }
 
     #[test]

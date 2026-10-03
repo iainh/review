@@ -35,6 +35,26 @@ impl Tabs {
         self.active.map(|index| self.entries[index].id)
     }
 
+    pub fn is_dirty(&self, id: u64, active: Option<&Viewer>) -> bool {
+        if Some(id) == self.active_id() {
+            active.is_some_and(Viewer::is_dirty)
+        } else {
+            self.entries
+                .iter()
+                .find(|tab| tab.id == id)
+                .and_then(|tab| tab.viewer.as_ref())
+                .is_some_and(Viewer::is_dirty)
+        }
+    }
+
+    pub fn dirty_ids(&self, active: Option<&Viewer>) -> Vec<u64> {
+        self.entries
+            .iter()
+            .filter(|tab| self.is_dirty(tab.id, active))
+            .map(|tab| tab.id)
+            .collect()
+    }
+
     pub fn find(&self, path: &Path) -> Option<u64> {
         self.entries
             .iter()
@@ -157,7 +177,13 @@ impl Tabs {
         }
     }
 
-    pub fn ui(&mut self, root: &mut egui::Ui, enabled: bool, has_viewer: bool) -> Option<Action> {
+    pub fn ui(
+        &mut self,
+        root: &mut egui::Ui,
+        enabled: bool,
+        viewer: Option<&Viewer>,
+    ) -> Option<Action> {
+        let has_viewer = viewer.is_some();
         let mut action = None;
         if enabled {
             root.ctx().input_mut(|input| {
@@ -204,6 +230,8 @@ impl Tabs {
                                         && (Some(tab.id) != self.active_id() || !has_viewer);
                                     let label = if unopened {
                                         format!("{name} (not opened)")
+                                    } else if self.is_dirty(tab.id, viewer) {
+                                        format!("{name} *")
                                     } else {
                                         name.into_owned()
                                     };
@@ -270,7 +298,7 @@ mod tests {
                     }],
                     ..Default::default()
                 },
-                |ui| action = tabs.ui(ui, enabled, false),
+                |ui| action = tabs.ui(ui, enabled, None),
             );
             action
         };

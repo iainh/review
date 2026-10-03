@@ -182,8 +182,12 @@ can pause briefly and consume additional memory.
 **Save** (**Ctrl+S** / **Cmd+S**) replaces the current PDF. **Save As…**
 (**Ctrl+Shift+S** / **Cmd+Shift+S**) chooses another file and makes it the current
 destination. The title shows `*` while document changes are unsaved. Closing the
-window or opening another PDF offers **Save**, **Save As**, **Discard** and
-**Cancel**; a cancelled or failed save leaves the current document open.
+tab offers **Save**, **Save As**, **Discard** and **Cancel**; a cancelled or failed
+save leaves that document open. Opening another PDF retains its unsaved changes
+in its tab. Window exit checks every dirty tab in order. Cancelling any exit
+prompt retains all tabs, including buffers previously marked for discard.
+Save As refuses to overwrite a PDF open in another tab; close that tab or choose
+another destination first.
 Saving writes a temporary file beside the destination, reopens and authenticates
 it, checks its pages and permissions, then replaces the destination. Encryption
 and passwords are preserved. Background rendering, previews and printing use
@@ -481,8 +485,10 @@ session described below. It requires a GTK file-chooser portal or Zenity and
 check masked password entry, retry, keyboard and button cancellation, preserved
 navigation, owner access and permission notices with synthetic encrypted PDFs.
 `bash tests/wayland-tabs.sh` checks independent reading/sidebar states, duplicate
-focus, tab switching/closing, opt-in restart and encrypted lazy restoration
-with disposable state. It uses the same native Sway and chooser workflow.
+focus, tab switching/closing, opt-in restart, encrypted lazy restoration and the
+16-document limit. It also checks failed-save retention, dirty tab closure and
+cancellation midway through the window-exit queue. It uses disposable PDF/state
+directories and the same native Sway and chooser workflow.
 `bash tests/wayland-inspection.sh` checks label navigation, inspector tabs,
 rendered layer toggles and explicit attachment saving/cancellation using a
 synthetic PDF. It additionally requires ImageMagick for pixel checks.

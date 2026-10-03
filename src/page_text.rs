@@ -6,6 +6,7 @@ use crate::document::PdfDocument;
 #[derive(Default)]
 pub struct PageText {
     pub open: bool,
+    pub field_id: Option<Id>,
     cached: Option<(usize, u64, Result<String, String>)>,
     focus: bool,
 }
@@ -19,7 +20,8 @@ impl PageText {
         self.open = !self.open;
         self.focus = self.open;
         if !self.open {
-            ctx.memory_mut(|memory| memory.surrender_focus(Id::new("page_text")));
+            let id = self.field_id.unwrap_or_else(|| Id::new("page_text"));
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
         }
     }
 
@@ -27,13 +29,9 @@ impl PageText {
         if !self.open {
             return;
         }
+        let field_id = self.field_id.unwrap_or_else(|| Id::new("page_text"));
         let copy_allowed = document.permissions().copy;
-        if !copy_allowed
-            && (self.focus
-                || root
-                    .ctx()
-                    .memory(|memory| memory.has_focus(Id::new("page_text"))))
-        {
+        if !copy_allowed && (self.focus || root.ctx().memory(|memory| memory.has_focus(field_id))) {
             root.input_mut(|input| {
                 input
                     .events
@@ -79,7 +77,7 @@ impl PageText {
                             let mut read_only = text.as_str();
                             let field = ui.add(
                                 egui::TextEdit::multiline(&mut read_only)
-                                    .id(Id::new("page_text"))
+                                    .id(field_id)
                                     .desired_width(f32::INFINITY),
                             ).labelled_by(label.id);
                             // The immutable buffer prevents editing. Expose that
@@ -111,7 +109,7 @@ impl PageText {
             });
         if !self.open {
             root.ctx()
-                .memory_mut(|memory| memory.surrender_focus(Id::new("page_text")));
+                .memory_mut(|memory| memory.surrender_focus(field_id));
         }
     }
 }
