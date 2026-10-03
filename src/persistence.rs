@@ -10,7 +10,10 @@ use anyhow::{Context, Result, ensure};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::zoom::Zoom;
+use crate::{
+    layout::{LayoutMode, Rotation},
+    zoom::Zoom,
+};
 
 pub const MAX_RECENT: usize = 32;
 pub const MAX_BOOKMARKS: usize = 512;
@@ -21,9 +24,12 @@ const SAVE_INTERVAL: Duration = Duration::from_millis(500);
 #[serde(default)]
 pub struct ReadingState {
     pub page: usize,
-    /// Visible top-left in page-relative PDF points, independent of zoom/DPI.
+    /// Viewport top-left in original page-relative PDF points, independent of
+    /// zoom/DPI. May lie outside the active page in a multi-page layout.
     pub scroll: [f32; 2],
     pub zoom: Zoom,
+    pub layout: LayoutMode,
+    pub rotation: Rotation,
 }
 
 impl ReadingState {
@@ -34,7 +40,7 @@ impl ReadingState {
             self.zoom = Zoom::default();
         }
         for offset in &mut self.scroll {
-            if !offset.is_finite() || *offset < 0.0 {
+            if !offset.is_finite() {
                 *offset = 0.0;
             }
         }
@@ -379,8 +385,10 @@ mod tests {
         let path = directory.path().join("résumé.pdf");
         let reading = ReadingState {
             page: 16,
-            scroll: [137.0, 419.5],
+            scroll: [-137.0, 419.5],
             zoom: Zoom::Percent(1.375),
+            layout: LayoutMode::Facing,
+            rotation: Rotation::Counterclockwise,
         };
         let mut store = Store::temporary(directory.path());
         store.state.opened(path.clone(), reading.clone());
@@ -492,7 +500,7 @@ mod tests {
         assert!(error.is_none());
         assert_eq!(store.state.sidebar.width, 200.0);
         assert_eq!(store.state.window.size, [960.0, 720.0]);
-        assert_eq!(store.state.recent[0].reading.scroll, [0.0, 87.0]);
+        assert_eq!(store.state.recent[0].reading.scroll, [-3.0, 87.0]);
         assert_eq!(store.state.recent[0].reading.zoom, Zoom::FitPage);
     }
 

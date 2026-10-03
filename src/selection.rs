@@ -1,18 +1,24 @@
-use std::ops::Range;
+use std::{collections::BTreeMap, ops::Range};
 
 use anyhow::Result;
 use egui::{Color32, Key, Modifiers, Rect, Sense, Ui, Vec2};
 
-use crate::{document::PdfDocument, structured_text::PageText};
+use crate::{document::PdfDocument, layout::PageTransform, structured_text::PageText};
 
-/// Only the displayed page is cached. Selection survives zoom, not navigation.
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Endpoint {
+    page: usize,
+    caret: usize,
+}
+
+/// Only visible pages are cached. Endpoints survive scrolling and rotation;
+/// explicit navigation clears them. Copy extracts intervening pages on demand.
 #[derive(Default)]
 pub struct Selection {
-    page: Option<usize>,
+    cache: BTreeMap<usize, PageText>,
     revision: u64,
-    text: PageText,
-    anchor: usize,
-    range: Range<usize>,
+    anchor: Endpoint,
+    end: Endpoint,
 }
 
 impl Selection {
@@ -21,19 +27,19 @@ impl Selection {
     }
 
     pub fn quads(&self, page: usize) -> Vec<crate::structured_text::Quad> {
-        if self.page != Some(page) {
+        let Some(text) = self.cache.get(&page) else {
             return Vec::new();
-        }
-        self.text
-            .lines
+        };
+        let range = self.range(page, text.chars.len());
+        text.lines
             .iter()
             .filter_map(|line| {
-                let start = line.chars.start.max(self.range.start);
-                let end = line.chars.end.min(self.range.end);
+                let start = line.chars.start.max(range.start);
+                let end = line.chars.end.min(range.end);
                 if start >= end {
                     return None;
                 }
-                let glyphs: Vec<_> = self.text.chars[start..end]
+                let glyphs: Vec<_> = text.chars[start..end]
                     .iter()
                     .filter_map(|ch| ch.quad)
                     .collect();
@@ -78,14 +84,15 @@ impl Selection {
     }
 
     pub fn escape(&mut self, ctx: &egui::Context) {
-        if !self.range.is_empty()
+        if self.anchor != self.end
             && !ctx.egui_wants_keyboard_input()
             && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
         {
-            self.range = 0..0;
+            self.end = self.anchor;
         }
     }
 
+    #[cfg(test)]
     pub fn ui(
         &mut self,
         ui: &mut Ui,
@@ -93,40 +100,91 @@ impl Selection {
         page: Rect,
         copy_allowed: bool,
     ) -> Result<()> {
-        if self.page != Some(document.current_page()) || self.revision != document.text_revision() {
+        if !self.cache.contains_key(&document.current_page()) {
             self.clear();
         }
+        self.pages_ui(
+            ui,
+            document,
+            &[(
+                document.current_page(),
+                PageTransform {
+                    rect: page,
+                    rotation: Default::default(),
+                },
+            )],
+            copy_allowed,
+            true,
+        )
+    }
+
+    pub fn pages_ui(
+        &mut self,
+        ui: &mut Ui,
+        document: &PdfDocument,
+        pages: &[(usize, PageTransform)],
+        copy_allowed: bool,
+        selecting: bool,
+    ) -> Result<()> {
         let selection_allowed = copy_allowed || document.permissions().annotate;
-        if !selection_allowed {
+        if !selection_allowed || self.revision != document.text_revision() {
             self.clear();
-        } else if self.page.is_none() {
-            self.page = Some(document.current_page());
-            self.text = document.structured_text(document.current_page())?;
             self.revision = document.text_revision();
         }
-        let response = ui.interact(
-            page,
-            ui.id().with("text_selection"),
-            Sense::click_and_drag(),
-        );
-        response.widget_info(|| {
-            egui::WidgetInfo::labeled(
-                egui::WidgetType::Other,
-                ui.is_enabled(),
-                format!("PDF page {}", document.current_page() + 1),
-            )
-        });
-        ui.ctx().accesskit_node_builder(response.id, |node| {
-            node.set_role(egui::accesskit::Role::Image)
-        });
-        let point = |position: egui::Pos2| {
-            [
-                (position.x - page.min.x) / page.width(),
-                (position.y - page.min.y) / page.height(),
-            ]
-        };
         if selection_allowed {
-            if response.hovered() && !self.text.chars.is_empty() {
+            self.cache
+                .retain(|page, _| pages.iter().any(|(p, _)| p == page));
+            for &(page, _) in pages {
+                if let std::collections::btree_map::Entry::Vacant(entry) = self.cache.entry(page) {
+                    entry.insert(document.structured_text(page)?);
+                }
+            }
+        }
+        for &(number, page) in pages {
+            let response = ui.interact(
+                page.rect,
+                ui.id().with(("pdf_page", number)),
+                Sense::hover(),
+            );
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Other,
+                    ui.is_enabled(),
+                    format!("PDF page {}", number + 1),
+                )
+            });
+            ui.ctx().accesskit_node_builder(response.id, |node| {
+                node.set_role(egui::accesskit::Role::Image)
+            });
+        }
+        let response = ui.interact(
+            pages
+                .iter()
+                .fold(Rect::NOTHING, |rect, (_, p)| rect.union(p.rect)),
+            ui.id().with("text_selection"),
+            if selecting {
+                Sense::click_and_drag()
+            } else {
+                Sense::hover()
+            },
+        );
+        let nearest = |position: egui::Pos2| {
+            pages.iter().min_by(|(_, a), (_, b)| {
+                a.rect
+                    .distance_to_pos(position)
+                    .total_cmp(&b.rect.distance_to_pos(position))
+            })
+        };
+        if selection_allowed && selecting {
+            if response.hovered()
+                && response
+                    .hover_pos()
+                    .and_then(nearest)
+                    .is_some_and(|(p, t)| {
+                        response.hover_pos().is_some_and(|pos| t.rect.contains(pos))
+                            && !self.cache[p].chars.is_empty()
+                    })
+            {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
             }
             // Start on press, not drag_started's current position: otherwise the
@@ -138,105 +196,169 @@ impl Selection {
                         memory.surrender_focus(id);
                     }
                 });
-                if let Some(hit) = ui
-                    .input(|input| input.pointer.press_origin())
-                    .and_then(|p| self.text.hit(point(p)))
+                if let Some((page, hit)) =
+                    ui.input(|input| input.pointer.press_origin())
+                        .and_then(|pos| {
+                            let (p, t) = nearest(pos)?;
+                            t.rect.contains(pos).then_some(())?;
+                            Some((*p, self.cache[p].hit(t.normalized(pos))?))
+                        })
                 {
-                    self.anchor = hit.caret;
-                    self.range = hit.caret..hit.caret;
+                    self.anchor = Endpoint {
+                        page,
+                        caret: hit.caret,
+                    };
+                    self.end = self.anchor;
                 }
             }
             if response.dragged_by(egui::PointerButton::Primary)
-                && let Some(hit) = response
-                    .interact_pointer_pos()
-                    .and_then(|p| self.text.hit(point(p)))
+                && let Some((page, hit)) = response.interact_pointer_pos().and_then(|pos| {
+                    let (p, t) = nearest(pos)?;
+                    Some((*p, self.cache[p].hit(t.normalized(pos))?))
+                })
             {
-                self.range = self.anchor.min(hit.caret)..self.anchor.max(hit.caret);
+                self.end = Endpoint {
+                    page,
+                    caret: hit.caret,
+                };
                 // Keep selection usable beyond the viewport at high zoom.
                 if let Some(position) = response.interact_pointer_pos() {
                     ui.scroll_to_rect(Rect::from_center_size(position, Vec2::splat(16.0)), None);
                 }
             }
             if (response.double_clicked() || response.triple_clicked())
-                && let Some(hit) = response
-                    .interact_pointer_pos()
-                    .and_then(|p| self.text.hit(point(p)))
+                && let Some((page, hit)) = response.interact_pointer_pos().and_then(|pos| {
+                    let (p, t) = nearest(pos)?;
+                    Some((*p, self.cache[p].hit(t.normalized(pos))?))
+                })
             {
-                self.range = if response.triple_clicked() {
-                    self.text.paragraph(hit.glyph)
+                let text = &self.cache[&page];
+                let range = if response.triple_clicked() {
+                    text.paragraph(hit.glyph)
                 } else {
-                    self.text.word(hit.glyph)
+                    text.word(hit.glyph)
                 };
-                self.anchor = self.range.start;
-            }
-            if !ui.ctx().egui_wants_keyboard_input() {
-                if ui.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::A)) {
-                    self.select_all();
-                }
-                let copy = ui.input_mut(|input| {
-                    let key = input.consume_key(Modifiers::COMMAND, Key::C);
-                    let event = input
-                        .events
-                        .iter()
-                        .any(|event| matches!(event, egui::Event::Copy));
-                    input
-                        .events
-                        .retain(|event| !matches!(event, egui::Event::Copy));
-                    key || event
-                });
-                if copy && copy_allowed {
-                    self.copy(ui.ctx());
-                }
+                self.anchor = Endpoint {
+                    page,
+                    caret: range.start,
+                };
+                self.end = Endpoint {
+                    page,
+                    caret: range.end,
+                };
             }
         }
+        if selection_allowed && ui.is_enabled() && !ui.ctx().egui_wants_keyboard_input() {
+            if ui.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::A)) {
+                self.select_all(document.current_page());
+            }
+            let copy = ui.input_mut(|input| {
+                let key = input.consume_key(Modifiers::COMMAND, Key::C);
+                let event = input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Copy));
+                input
+                    .events
+                    .retain(|event| !matches!(event, egui::Event::Copy));
+                key || event
+            });
+            if copy && copy_allowed {
+                self.copy(ui.ctx(), document)?;
+            }
+        }
+        let mut copy = false;
         response.context_menu(|ui| {
             if !copy_allowed {
                 ui.label("This PDF does not allow copying text.");
             }
             if ui
                 .add_enabled(
-                    copy_allowed && !self.range.is_empty(),
+                    copy_allowed && self.anchor != self.end,
                     egui::Button::new("Copy"),
                 )
                 .clicked()
             {
-                self.copy(ui.ctx());
+                copy = true;
                 ui.close();
             }
             if ui
                 .add_enabled(
-                    selection_allowed && !self.text.chars.is_empty(),
+                    selection_allowed && self.cache.values().any(|p| !p.chars.is_empty()),
                     egui::Button::new("Select all on page"),
                 )
                 .clicked()
             {
-                self.select_all();
+                let page = response
+                    .interact_pointer_pos()
+                    .and_then(nearest)
+                    .map_or(document.current_page(), |(p, _)| *p);
+                self.select_all(page);
                 ui.close();
             }
         });
-        for ch in &self.text.chars[self.range.clone()] {
-            if let Some(quad) = ch.quad {
-                let points =
-                    quad.map(|p| page.min + Vec2::new(p[0] * page.width(), p[1] * page.height()));
-                ui.painter().add(egui::Shape::convex_polygon(
-                    points.to_vec(),
-                    Color32::from_rgba_unmultiplied(50, 125, 255, 85),
-                    egui::Stroke::NONE,
-                ));
+        if copy {
+            self.copy(ui.ctx(), document)?;
+        }
+        for &(number, page) in pages {
+            let Some(text) = self.cache.get(&number) else {
+                continue;
+            };
+            for ch in &text.chars[self.range(number, text.chars.len())] {
+                if let Some(quad) = ch.quad {
+                    let points = quad.map(|p| page.screen(p));
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        points.to_vec(),
+                        Color32::from_rgba_unmultiplied(50, 125, 255, 85),
+                        egui::Stroke::NONE,
+                    ));
+                }
             }
         }
         Ok(())
     }
 
-    fn select_all(&mut self) {
-        self.anchor = 0;
-        self.range = 0..self.text.chars.len();
+    fn select_all(&mut self, page: usize) {
+        self.anchor = Endpoint { page, caret: 0 };
+        self.end = Endpoint {
+            page,
+            caret: self.cache.get(&page).map_or(0, |text| text.chars.len()),
+        };
     }
 
-    fn copy(&self, ctx: &egui::Context) {
-        if !self.range.is_empty() {
-            ctx.copy_text(self.text.text(self.range.clone()));
+    fn range(&self, page: usize, len: usize) -> Range<usize> {
+        let start = self.anchor.min(self.end);
+        let end = self.anchor.max(self.end);
+        if page < start.page || page > end.page {
+            return 0..0;
         }
+        let a = if page == start.page { start.caret } else { 0 };
+        let b = if page == end.page { end.caret } else { len };
+        a.min(len)..b.min(len)
+    }
+
+    fn copy(&self, ctx: &egui::Context, document: &PdfDocument) -> Result<()> {
+        // Check again at the extraction boundary, before touching any page.
+        if document.permissions().copy && self.anchor != self.end {
+            let mut output = String::new();
+            let start = self.anchor.min(self.end).page;
+            let end = self.anchor.max(self.end).page;
+            for page in start..=end {
+                let extracted;
+                let text = if let Some(text) = self.cache.get(&page) {
+                    text
+                } else {
+                    extracted = document.structured_text(page)?;
+                    &extracted
+                };
+                if page != start {
+                    output.push('\n');
+                }
+                output.push_str(&text.text(self.range(page, text.chars.len())));
+            }
+            ctx.copy_text(output);
+        }
+        Ok(())
     }
 }
 
@@ -248,8 +370,7 @@ mod tests {
     fn markup_joins_glyphs_per_line_without_losing_rotation_or_reversed_order() {
         use crate::structured_text::{TextChar, TextLine};
         let mut selection = Selection {
-            page: Some(0),
-            range: 0..3,
+            end: Endpoint { page: 0, caret: 3 },
             ..Default::default()
         };
         let quads = [
@@ -257,7 +378,8 @@ mod tests {
             [[0.3, 0.7], [0.3, 0.65], [0.25, 0.65], [0.25, 0.7]],
             [[0.3, 0.5], [0.3, 0.45], [0.25, 0.45], [0.25, 0.5]],
         ];
-        selection.text.chars = quads
+        let text = selection.cache.entry(0).or_default();
+        text.chars = quads
             .into_iter()
             .map(|quad| TextChar {
                 ch: 'a',
@@ -265,7 +387,7 @@ mod tests {
                 bidi: 0,
             })
             .collect();
-        selection.text.lines = vec![TextLine {
+        text.lines = vec![TextLine {
             chars: 0..3,
             direction: [0.0, -1.0],
         }];
@@ -281,7 +403,7 @@ mod tests {
             }
         }
         assert!(selection.quads(1).is_empty());
-        selection.text.lines = vec![
+        selection.cache.get_mut(&0).unwrap().lines = vec![
             TextLine {
                 chars: 0..1,
                 direction: [0.0, -1.0],
@@ -443,7 +565,7 @@ mod tests {
             );
             if n >= 2 {
                 assert_eq!(
-                    selection.text.text(selection.range.clone()),
+                    selection.cache[&0].text(selection.range(0, selection.cache[&0].chars.len())),
                     if n == 2 {
                         "Alpha"
                     } else {
@@ -460,7 +582,7 @@ mod tests {
         let document = crate::document::tests::sample_document();
         let mut selection = Selection::default();
         frame(&mut selection, &ctx, &document, vec![], 0.0, true);
-        selection.range = 0..5;
+        selection.end.caret = 5;
         let pos = egui::pos2(44.0, 64.0);
         let secondary = |pressed| egui::Event::PointerButton {
             pos,
@@ -525,7 +647,7 @@ mod tests {
             0.0,
             true,
         );
-        assert!(!selection.range.is_empty());
+        assert!(selection.anchor != selection.end);
         let denied = frame(
             &mut selection,
             &ctx,
@@ -535,9 +657,9 @@ mod tests {
             false,
         );
         assert!(clipboard(denied).is_none());
-        assert!(!selection.range.is_empty());
+        assert!(selection.anchor != selection.end);
         assert!(!selection.quads(0).is_empty());
-        assert_eq!(selection.page, Some(0));
+        assert!(selection.cache.contains_key(&0));
         frame(
             &mut selection,
             &ctx,
@@ -579,6 +701,59 @@ mod tests {
     }
 
     #[test]
+    fn copy_streams_uncached_endpoints_in_document_order_and_denial_never_extracts() {
+        let document = crate::document::tests::sample_document();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("denied.pdf");
+        crate::document::tests::encrypted_fixture(
+            &path,
+            "",
+            mupdf::pdf::Permission::empty(),
+            mupdf::pdf::Encryption::Aes256,
+        );
+        let denied = PdfDocument::open(&path).unwrap();
+        assert!(!denied.permissions().copy && !denied.permissions().annotate);
+        let ctx = egui::Context::default();
+        let a = Endpoint { page: 0, caret: 2 };
+        let b = Endpoint { page: 1, caret: 5 };
+        for (anchor, end) in [(a, b), (b, a)] {
+            let mut selection = Selection {
+                anchor,
+                end,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(Default::default(), |ui| {
+                selection.copy(ui.ctx(), &document).unwrap()
+            });
+            assert_eq!(
+                clipboard(output).as_deref(),
+                Some("pha alpha\nNeedle\nphrase\nLast ")
+            );
+            assert!(selection.cache.is_empty());
+            let output = ctx.run_ui(Default::default(), |ui| {
+                selection
+                    .pages_ui(
+                        ui,
+                        &denied,
+                        &[(
+                            9999,
+                            PageTransform {
+                                rect: Rect::from_min_size(egui::Pos2::ZERO, Vec2::splat(300.0)),
+                                rotation: Default::default(),
+                            },
+                        )],
+                        false,
+                        true,
+                    )
+                    .unwrap()
+            });
+            assert!(clipboard(output).is_none());
+            assert!(selection.cache.is_empty());
+            assert!(selection.anchor == selection.end);
+        }
+    }
+
+    #[test]
     fn recognition_replaces_an_empty_cache_and_invalidates_old_selection() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("blank.pdf");
@@ -587,7 +762,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut selection = Selection::default();
         frame(&mut selection, &ctx, &document, vec![], 0.0, true);
-        assert!(selection.text.chars.is_empty());
+        assert!(selection.cache[&0].chars.is_empty());
         document
             .set_recognized_text(0, crate::ocr::tests::word_text("amber fox"))
             .unwrap();
@@ -625,8 +800,8 @@ mod tests {
             ))
             .is_none()
         );
-        assert!(selection.range.is_empty());
-        assert_eq!(selection.text.plain_text(), "violet river");
+        assert!(selection.anchor == selection.end);
+        assert_eq!(selection.cache[&0].plain_text(), "violet river");
         assert!(
             clipboard(frame(
                 &mut selection,
@@ -640,7 +815,7 @@ mod tests {
         );
         // Copy denial still permits markup selection when annotations are allowed.
         assert!(document.permissions().annotate);
-        assert_eq!(selection.text.plain_text(), "violet river");
+        assert_eq!(selection.cache[&0].plain_text(), "violet river");
         assert!(!selection.quads(0).is_empty());
     }
 }

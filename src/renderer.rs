@@ -116,7 +116,13 @@ impl Renderer {
     }
 
     pub fn take_input(&mut self) -> egui::RawInput {
-        self.input.take_egui_input(&self.window)
+        let mut input = self.input.take_egui_input(&self.window);
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .fullscreen = Some(self.window.fullscreen().is_some());
+        input
     }
 
     pub fn on_accesskit_event(&mut self, event: egui_winit::accesskit_winit::Event) {
@@ -145,6 +151,15 @@ impl Renderer {
     }
 
     pub fn render(&mut self, mut output: egui::FullOutput) -> Result<()> {
+        if let Some(viewport) = output.viewport_output.get(&egui::ViewportId::ROOT) {
+            for command in &viewport.commands {
+                if let egui::ViewportCommand::Fullscreen(enabled) = command {
+                    self.window.set_fullscreen(
+                        enabled.then_some(winit::window::Fullscreen::Borderless(None)),
+                    );
+                }
+            }
+        }
         output.platform_output.commands.retain(|command| {
             if let egui::OutputCommand::OpenUrl(request) = command {
                 // Revalidate at the native boundary. The opener uses OS scheme

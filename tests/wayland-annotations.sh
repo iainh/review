@@ -29,6 +29,8 @@ key() { wtype -s 150 -k "$1" -s 150; }
 command_key() { wtype -s 150 -M ctrl -k "$1" -m ctrl -s 150; }
 # Coordinates below are viewer-relative; the library toolbar adds 22 pixels.
 click() { "$scratch/pointer" click "$1" "$(($2 + 22))"; }
+# Page/sidebar content also follows the added reading-layout toolbar.
+click_content() { "$scratch/pointer" click "$1" "$(($2 + 44))"; }
 capture() {
     if [[ -n ${REVIEW_SCREENSHOTS:-} ]]; then
         mkdir -p "$REVIEW_SCREENSHOTS"
@@ -46,14 +48,14 @@ open_pdf() {
 open_pdf annotations
 [[ $(swaymsg -t get_tree | jq -r '.. | objects | select(.app_id? == "review") | .shell') == xdg_shell ]]
 click 48 34
-click 1090 161
-click 1140 238
+click_content 1090 161
+click_content 1140 238
 wtype -s 150 -M ctrl -k a -m ctrl -s 150 'Edited native note' -s 150
-click 1073 311
+click_content 1073 311
 expect_title 'Review — annotations.pdf * — 1/2 — Fit page'
 command_key s
 expect_title 'Review — annotations.pdf — 1/2 — Fit page'
-click 1151 311
+click_content 1151 311
 expect_title 'Review — annotations.pdf * — 1/2 — Fit page'
 click 355 34
 expect_title 'Review — annotations.pdf — 1/2 — Fit page'
@@ -72,10 +74,10 @@ command_key a
 click 283 34
 sleep .5
 capture annotations-markup
-click 1097 98
+click_content 1097 98
 click 850 500
 sleep .5
-click 1137 98
+click_content 1137 98
 "$scratch/pointer" drag 590 712 830 787
 sleep .5
 expect_title 'Review — annotations.pdf * — 1/2 — Fit page'
@@ -102,7 +104,7 @@ jq -e --arg path "$scratch/native-save.pdf" '.recent[0].path == $path' "$scratch
 echo 'PASS: Save As updates reading-state identity before reopening'
 open_pdf native-save
 click 48 34
-click 92 56
+click_content 92 56
 sleep .8
 capture annotations-saved
 echo 'PASS: native editing, deletion, undo/redo, unsaved-close cancellation and Save As'

@@ -63,6 +63,16 @@ PY
     )
     "$scratch/pointer" "$1" "$x" "$y" "${@:4}"
 }
+outline_click() {
+    # Follow native geometry, independent of the number of toolbar rows.
+    rm -f "$scratch/outline.json"
+    swaymsg "exec /usr/bin/python3 '$geometry' '$scratch/outline.json' '$1  ·  Page 2' 'push button' > '$scratch/outline.log' 2>&1" >/dev/null
+    for _ in {1..100}; do [[ -f "$scratch/outline.json" ]] && break; sleep .1; done
+    if [[ ! -f "$scratch/outline.json" ]]; then cat "$scratch/outline.log" >&2; exit 1; fi
+    local x y width height
+    read -r x y width height < <(jq -r '@tsv' "$scratch/outline.json")
+    "$scratch/pointer" click "$((x + width / 2))" "$((y + height / 2))"
+}
 
 expect 1 'Fit page'
 swaymsg "exec /usr/bin/python3 '$geometry' '$scratch/page.json' 'PDF page 1' > '$scratch/geometry.log' 2>&1" >/dev/null
@@ -100,11 +110,11 @@ capture named
 same_page_pixels xyz named
 back
 expect 1 'Fit page'
-"$scratch/pointer" click 100 108
+outline_click 'Named XYZ destination'
 expect 2 '225%'
 capture outline-xyz
 same_page_pixels xyz outline-xyz
-"$scratch/pointer" click 100 130
+outline_click 'Fit width destination'
 expect 2 'Fit width'
 capture outline-fit-width
 back

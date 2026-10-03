@@ -1,3 +1,4 @@
+use crate::layout::PageTransform;
 use anyhow::Result;
 use egui::{Color32, Rect};
 use mupdf::{
@@ -143,21 +144,22 @@ pub fn extract(document: &Document, number: usize) -> Result<Vec<PageLink>> {
 }
 
 impl PageLink {
+    #[cfg(test)]
     pub fn screen_bounds(&self, page: Rect) -> Rect {
-        Rect::from_min_max(
-            page.min + self.bounds.min.to_vec2() * page.size(),
-            page.min + self.bounds.max.to_vec2() * page.size(),
-        )
-        .intersect(page)
+        PageTransform {
+            rect: page,
+            rotation: Default::default(),
+        }
+        .bounds(self.bounds)
     }
 }
 
 /// Keep hit testing and feedback independent of page rendering/text selection.
 /// Register after Selection::ui: links claim clicks/hover, selection owns drags.
-pub fn ui(ui: &mut egui::Ui, links: &[PageLink], page: Rect) -> Option<LinkTarget> {
+pub fn ui(ui: &mut egui::Ui, links: &[PageLink], page: PageTransform) -> Option<LinkTarget> {
     let mut activated = None;
     for (index, link) in links.iter().enumerate() {
-        let rect = link.screen_bounds(page);
+        let rect = page.bounds(link.bounds);
         if !rect.is_positive() {
             continue;
         }

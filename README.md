@@ -16,9 +16,9 @@ cargo run --release -- document.pdf
 Launch without a path to open an empty window. Use **Open** or **Ctrl+O**
 (**Cmd+O** on macOS) to choose a PDF in the native file dialog, or drop a PDF
 onto the window. Opening another PDF replaces the current document and resets
-search and previews. Previously visited files restore their page, scroll position
-and zoom. Cancelling the dialog or failing to open a file leaves the current PDF
-unchanged; errors appear in the window.
+search and previews. Previously visited files restore their page, scroll
+position, zoom, layout and rotation. Cancelling the dialog or failing to open
+a file leaves the current PDF unchanged; errors appear in the window.
 
 Password-protected PDFs open through a masked password prompt. Press **Enter**
 or **Open PDF** to unlock; an incorrect password clears the field for retry.
@@ -46,6 +46,18 @@ Percentage zoom is independent of window size: 100% uses 96 logical pixels
 per inch for PDF points (72 per inch). Fit modes adapt to the viewport and
 display their effective percentage. Very large page renders report a memory
 limit error instead of allocating an unbounded image.
+
+Use **Layout** to choose **Single page**, **Continuous** vertical scrolling or
+**Facing pages** in continuous pairs (1–2, 3–4, with an unpaired final page).
+Pages retain their proportions and share one scale; multi-page fit modes use
+the largest page or spread so scrolling does not change the zoom. Only visible
+pages are displayed, with at most 12 page textures and a 128 MiB texture budget.
+Use **Rotate left/right** or **Shift+R**/**R** to rotate in 90° steps. Rotation
+also applies to links, search and text-selection highlights; it does not change
+the PDF or printed pages. **Hand tool** pans by dragging; **H** toggles between
+hand panning and text selection. **Ctrl+wheel** or a pinch gesture over a page
+zooms around the pointer. **F11** toggles fullscreen; **Escape** leaves it after
+dismissing focused editing or clearing selection.
 
 Use **Ctrl+G** (**Cmd+G** on macOS) to select the page field. Enter a page
 number or exact PDF page label, such as `iv` or `A-1`, then press **Enter** or
@@ -76,8 +88,10 @@ active search automatically; native PDF text remains authoritative.
 
 Drag across page text to select it, double-click a word or triple-click a
 paragraph. Use **Ctrl+A** (**Cmd+A** on macOS) to select all text on the
-displayed page, then **Ctrl+C** (**Cmd+C**) or right-click **Copy**. Selection
-is blue, survives zoom changes and clears on page changes. **Escape** clears
+active page, then **Ctrl+C** (**Cmd+C**) or right-click **Copy**. Drag between
+visible pages in continuous or facing layouts to copy across pages in document
+order. Selection is blue, survives scrolling, zoom and rotation, and clears on
+explicit page or destination jumps. **Escape** clears
 selection. These shortcuts still edit text when a toolbar
 field has focus. Copying requires the PDF's copy permission. Extraction uses
 MuPDF's column segmentation and Unicode text layer; complex layouts or PDFs
@@ -100,9 +114,9 @@ than the content bounding box; destination percentages use the 10–1600% limits
 
 Use **Back**/**Forward** or **Alt+Left**/**Alt+Right** to retrace page, link,
 outline, preview and search jumps. History preserves the page, document
-position and zoom at each jump, including later scrolling before going back.
-A new jump after going back clears the forward history. Opening another PDF
-starts a new history.
+position, zoom, layout and rotation at each jump, including later scrolling
+before going back. A new jump after going back clears the forward history.
+Opening another PDF starts a new history.
 
 ## Local OCR for scanned pages
 
@@ -272,19 +286,20 @@ enumerated. Document JavaScript and file-launch actions remain disabled.
 
 ## Reading state and privacy
 
-Review remembers page, scroll position and zoom mode/percentage for the 32 most
-recently opened files. Sidebar visibility, width and selected tab, and normal
-window size, position, maximized state and appearance persist between sessions. Window
-placement is restored only where the window system allows it; Wayland leaves
-placement to the compositor. Review does not automatically reopen a document
-when launched without a path.
+Review remembers page, scroll position, zoom mode/percentage, layout and rotation
+for the 32 most recently opened files. Sidebar visibility, width and selected
+tab, and normal window size, position, maximized state and appearance persist
+between sessions. Window placement is restored only where the window system
+allows it; Wayland leaves placement to the compositor. Review does not
+automatically reopen a document when launched without a path.
 
 Use **Recent files** to reopen a document. **Personal bookmarks** saves a page,
-zoom and scroll position without modifying the PDF. Use **Ctrl+B** (**Cmd+B** on
-macOS) to add or remove the current page bookmark, or use the menu. Select a saved
-location to navigate; **×** removes it. Up to 512 personal bookmarks are kept,
-independently of the PDF's embedded outline. Reopening an encrypted document
-still prompts for its password before restoring a saved location.
+zoom, scroll position, layout and rotation without modifying the PDF. Use
+**Ctrl+B** (**Cmd+B** on macOS) to add or remove the current page bookmark, or
+use the menu. Select a saved location to navigate; **×** removes it. Up to 512
+personal bookmarks are kept, independently of the PDF's embedded outline.
+Reopening an encrypted document still prompts for its password before restoring
+a saved location.
 
 **Recent files → Clear history…** removes recent files and saved reading
 positions after confirmation. It keeps personal bookmarks and sidebar/window
@@ -499,6 +514,13 @@ scrolling. It captures native hover and Copy Link states and compares restored
 page pixels with ImageMagick (`magick` is required in addition to the Wayland
 tools above). It never activates external links; Rust tests inspect egui's URL
 and clipboard requests without dispatching them to external applications.
+
+`tests/reading-layouts.py` checks native facing/continuous layouts, rotated
+cross-page selection, pointer-centred zoom, hand panning, fullscreen and rotated
+internal-link history. Run it inside the Sway D-Bus session with the Review
+binary, exported fixture directory and compiled `wayland-pointer.c` helper as
+arguments; an optional fourth argument saves screenshots. It uses isolated
+reading state and never activates an external link.
 
 This is a foundation, not a complete viewer. Form filling and tabs are not
 implemented yet.

@@ -1,13 +1,19 @@
 use mupdf::DestinationKind;
 
-use crate::zoom::{POINT_SCALE, Zoom};
+use crate::{
+    layout::{LayoutMode, Rotation},
+    zoom::{POINT_SCALE, Zoom},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewState {
     pub page: usize,
-    /// Visible top-left in page-relative PDF points, independent of zoom/DPI.
+    /// Viewport top-left in original page-relative PDF points, independent of
+    /// zoom/DPI. May lie outside the active page in a multi-page layout.
     pub position: [f32; 2],
     pub zoom: Zoom,
+    pub layout: LayoutMode,
+    pub rotation: Rotation,
 }
 
 #[derive(Default)]
@@ -55,25 +61,46 @@ pub fn destination_view(
     viewport: [f32; 2],
 ) -> ViewState {
     let mut next = ViewState { page, ..current };
+    let size = [bounds.x1 - bounds.x0, bounds.y1 - bounds.y0];
+    let corner = current.rotation.inverse([0.0; 2]);
+    let viewport = current.rotation.size(egui::Vec2::from(viewport));
     let x = |value: f32| (value - bounds.x0).max(0.0);
     let y = |value: f32| (value - bounds.y0).max(0.0);
     match kind {
         DestinationKind::Fit | DestinationKind::FitB => {
-            next.zoom = Zoom::FitPage;
-            next.position = [0.0; 2];
+            // Multi-page toolbar fit modes use the largest page/spread. A PDF
+            // destination instead fits its own page, regardless of neighbours.
+            next.zoom = if current.layout == LayoutMode::Single {
+                Zoom::FitPage
+            } else {
+                let scale = ((viewport.x - 32.0).max(1.0) / size[0])
+                    .min((viewport.y - 32.0).max(1.0) / size[1]);
+                Zoom::Percent((scale / POINT_SCALE).clamp(0.1, 16.0))
+            };
+            next.position = [corner[0] * size[0], corner[1] * size[1]];
         }
         DestinationKind::FitH { top } | DestinationKind::FitBH { top } => {
-            next.zoom = Zoom::FitWidth;
-            next.position[0] = 0.0;
+            next.zoom = if current.layout != LayoutMode::Single
+                || matches!(
+                    current.rotation,
+                    Rotation::Clockwise | Rotation::Counterclockwise
+                ) {
+                Zoom::Percent(
+                    (((viewport.x - 32.0).max(1.0) / size[0]) / POINT_SCALE).clamp(0.1, 16.0),
+                )
+            } else {
+                Zoom::FitWidth
+            };
+            next.position[0] = corner[0] * size[0];
             if let Some(top) = top.filter(|v| v.is_finite()) {
                 next.position[1] = y(top);
             }
         }
         DestinationKind::FitV { left } | DestinationKind::FitBV { left } => {
             next.zoom = Zoom::Percent(
-                ((viewport[1] - 32.0).max(1.0) / (bounds.y1 - bounds.y0)) / POINT_SCALE,
+                (((viewport.y - 32.0).max(1.0) / size[1]) / POINT_SCALE).clamp(0.1, 16.0),
             );
-            next.position[1] = 0.0;
+            next.position[1] = corner[1] * size[1];
             if let Some(left) = left.filter(|v| v.is_finite()) {
                 next.position[0] = x(left);
             }
@@ -99,10 +126,13 @@ pub fn destination_view(
             let width = right - left;
             let height = top - bottom;
             if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
-                let scale = ((viewport[0] - 32.0).max(1.0) / width)
-                    .min((viewport[1] - 32.0).max(1.0) / height);
+                let scale = ((viewport.x - 32.0).max(1.0) / width)
+                    .min((viewport.y - 32.0).max(1.0) / height);
                 next.zoom = Zoom::Percent((scale / POINT_SCALE).clamp(0.1, 16.0));
-                next.position = [x(left), y(bottom)];
+                next.position = [
+                    x(if corner[0] == 0.0 { left } else { right }),
+                    y(if corner[1] == 0.0 { bottom } else { top }),
+                ];
             }
         }
     }
@@ -118,6 +148,8 @@ mod tests {
             page,
             position,
             zoom,
+            layout: LayoutMode::Single,
+            rotation: Rotation::None,
         }
     }
 
@@ -188,5 +220,69 @@ mod tests {
             [632.0, 432.0],
         );
         assert_eq!(rectangle, state(1, [30.0, 75.0], Zoom::Percent(2.25)));
+    }
+
+    #[test]
+    fn rotated_fit_destinations_fit_original_axes_and_reveal_the_rotated_top_left() {
+        let mut current = state(0, [23.0, 171.0], Zoom::Percent(1.375));
+        current.rotation = Rotation::Clockwise;
+        current.layout = LayoutMode::Continuous;
+        let bounds = mupdf::Rect::new(10.0, 20.0, 310.0, 820.0);
+        let fit = destination_view(current, 1, DestinationKind::Fit, bounds, [632.0, 432.0]);
+        assert_eq!(fit.position, [0.0, 800.0]);
+        assert_eq!(fit.zoom, Zoom::Percent(0.5625));
+        let horizontal = destination_view(
+            current,
+            1,
+            DestinationKind::FitH { top: Some(137.0) },
+            bounds,
+            [632.0, 432.0],
+        );
+        assert_eq!(horizontal.position, [0.0, 117.0]);
+        assert_eq!(horizontal.zoom, Zoom::Percent(1.0));
+        let vertical = destination_view(
+            current,
+            1,
+            DestinationKind::FitV { left: Some(91.0) },
+            bounds,
+            [632.0, 432.0],
+        );
+        assert_eq!(vertical.position, [81.0, 800.0]);
+        assert_eq!(vertical.zoom, Zoom::Percent(0.5625));
+        let rectangle = destination_view(
+            current,
+            1,
+            DestinationKind::FitR {
+                left: 40.0,
+                bottom: 95.0,
+                right: 240.0,
+                top: 195.0,
+            },
+            bounds,
+            [632.0, 432.0],
+        );
+        assert_eq!(rectangle.position, [30.0, 175.0]);
+        assert_eq!(rectangle.zoom, Zoom::Percent(1.5));
+        assert_eq!(rectangle.rotation, current.rotation);
+        assert_eq!(rectangle.layout, current.layout);
+    }
+
+    #[test]
+    fn facing_fit_destinations_fit_the_target_page_not_the_spread() {
+        let mut current = state(0, [23.0, 171.0], Zoom::FitWidth);
+        current.layout = LayoutMode::Facing;
+        let bounds = mupdf::Rect::new(10.0, 20.0, 310.0, 820.0);
+        let fit = destination_view(current, 1, DestinationKind::Fit, bounds, [632.0, 432.0]);
+        assert_eq!(fit.zoom, Zoom::Percent(0.375));
+        assert_eq!(fit.position, [0.0, 0.0]);
+        let horizontal = destination_view(
+            current,
+            1,
+            DestinationKind::FitH { top: Some(137.0) },
+            bounds,
+            [632.0, 432.0],
+        );
+        assert_eq!(horizontal.zoom, Zoom::Percent(1.5));
+        assert_eq!(horizontal.position, [0.0, 117.0]);
     }
 }

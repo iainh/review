@@ -60,12 +60,13 @@ expect_title 'Review — outline.pdf — 1/2 — Fit page'
 key Right
 wtype -s 150 -M ctrl -k l -m ctrl -s 150 '600' -s 150 -k Return -s 150
 expect_title 'Review — outline.pdf — 2/2 — 600%'
-"$scratch/pointer" click 79 77
+"$scratch/pointer" click 79 99
 "$scratch/pointer" drag 240 450 327 450
 "$scratch/pointer" scroll 800 450 317
 bookmark
 # At 600%, one PDF point is 8 logical pixels. Subtract the 16px page margin.
-expect_state '.recent[0].reading.page == 1 and .recent[0].reading.zoom.Percent == 6 and .recent[0].reading.scroll == [0,37.625] and .sidebar.pages and .sidebar.width == 327 and (.bookmarks | length) == 1'
+# The viewport also begins 16px before the page horizontally: retain -2pt.
+expect_state '.recent[0].reading.page == 1 and .recent[0].reading.zoom.Percent == 6 and .recent[0].reading.scroll == [-2,37.625] and .recent[0].reading.layout == "Single" and .recent[0].reading.rotation == "None" and .sidebar.pages and .sidebar.width == 327 and (.bookmarks | length) == 1'
 jq '.recent[0].reading' "$state" > "$scratch/reading.json"
 capture saved-reading
 close

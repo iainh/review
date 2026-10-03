@@ -161,13 +161,17 @@ impl NativeUi {
                     (format!("{primary}++ / {primary}+- / {primary}+0"), "Zoom in / out / fit page"),
                     ("+ / - / 0".into(), "Zoom in / out / fit page¹"),
                     ("1 / 2".into(), "Actual size (100%) / fit width¹"),
+                    ("Ctrl+wheel / pinch".into(), "Zoom around the pointer on a page"),
+                    ("R / Shift+R".into(), "Rotate clockwise / counterclockwise¹"),
+                    ("H".into(), "Toggle text selection / hand pan¹"),
+                    ("F11".into(), "Enter / leave fullscreen"),
                     ("F9".into(), "Show / hide sidebar"),
                     (format!("{primary}+A / {primary}+C"), "Select all page text / copy selection"),
                     (format!("{primary}+Shift+T"), "Show / hide current page text"),
                     ("F6 / Shift+F6".into(), "Cycle page, zoom, search and page-text fields"),
                     ("Tab / Shift+Tab".into(), "Next / previous control"),
                     ("Enter / Space".into(), "Activate focused button"),
-                    ("Escape".into(), "Dismiss UI or clear selection; never quit"),
+                    ("Escape".into(), "Dismiss UI, clear selection or leave fullscreen; never quit"),
                     ("F1".into(), "Show / hide shortcut help"),
                 ] {
                     ui.label(keys);

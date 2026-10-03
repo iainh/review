@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a rendered page's screen bounds in the disposable Sway D-Bus session."""
+"""Export native screen bounds; optional third argument selects a non-image role."""
 import json
 from pathlib import Path
 import subprocess
@@ -22,9 +22,10 @@ for name in ["IsEnabled", "ScreenReaderEnabled"]:
                     "org.freedesktop.DBus.Properties.Set", "org.a11y.Status",
                     name, "<true>"], check=True, stdout=subprocess.DEVNULL)
 
+role = sys.argv[3] if len(sys.argv) > 3 else "image"
 for _ in range(100):
     image = next((node for app in pyatspi.Registry.getDesktop(0) for node in walk(app)
-                  if node.getRoleName() == "image" and node.name == sys.argv[2]), None)
+                  if node.getRoleName() == role and node.name == sys.argv[2]), None)
     if image:
         # Wayland does not expose global window positions to winit. Combine
         # window-local AccessKit bounds with Sway's actual client-area origin.

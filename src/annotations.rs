@@ -454,7 +454,7 @@ impl AnnotationUi {
         &mut self,
         ui: &mut egui::Ui,
         document: &mut PdfDocument,
-        page: egui::Rect,
+        pages: &[(usize, crate::layout::PageTransform)],
         mut before_edit: impl FnMut(),
     ) -> Result<bool> {
         if !self.open {
@@ -465,16 +465,22 @@ impl AnnotationUi {
             return Ok(false);
         }
         self.refresh(document)?;
-        let point = |p: egui::Pos2| {
-            [
-                ((p.x - page.min.x) / page.width()).clamp(0.0, 1.0),
-                ((p.y - page.min.y) / page.height()).clamp(0.0, 1.0),
-            ]
+        let Some((_, page)) = pages
+            .iter()
+            .find(|(number, _)| *number == document.current_page())
+        else {
+            return Ok(false);
         };
-        let screen = |p: [f32; 2]| page.min + egui::vec2(p[0] * page.width(), p[1] * page.height());
+        let point = |p: egui::Pos2| page.normalized(p).map(|axis| axis.clamp(0.0, 1.0));
+        let screen = |p: [f32; 2]| page.screen(p);
         if let Some(tool) = self.tool {
             let response = ui.interact(
-                page,
+                // One stable target covers every visible page before a press
+                // changes the current page. Per-current-page targets miss the
+                // first click on an inactive facing page.
+                pages
+                    .iter()
+                    .fold(egui::Rect::NOTHING, |rect, (_, p)| rect.union(p.rect)),
                 ui.id().with("annotation_canvas"),
                 egui::Sense::click_and_drag(),
             );
@@ -484,6 +490,7 @@ impl AnnotationUi {
             if tool == Kind::Note
                 && response.clicked()
                 && let Some(p) = response.interact_pointer_pos()
+                && page.rect.contains(p)
             {
                 before_edit();
                 document.add_annotation(
@@ -503,11 +510,15 @@ impl AnnotationUi {
             if tool == Kind::Ink {
                 if response.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
                     self.stroke.clear();
-                    if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
+                    if let Some(p) = ui
+                        .input(|i| i.pointer.press_origin())
+                        .filter(|p| page.rect.contains(*p))
+                    {
                         self.stroke.push(point(p));
                     }
                 }
                 if response.dragged()
+                    && !self.stroke.is_empty()
                     && let Some(p) = response.interact_pointer_pos()
                 {
                     let p = point(p);
@@ -538,7 +549,7 @@ impl AnnotationUi {
                     ui.painter().add(egui::Shape::line(
                         self.stroke.iter().copied().map(screen).collect(),
                         egui::Stroke::new(
-                            self.width * page.width()
+                            self.width * page.rotation.size(page.rect.size()).x
                                 / document.page_size(document.current_page())?.0,
                             colour,
                         ),
@@ -546,28 +557,34 @@ impl AnnotationUi {
                 }
             }
         } else {
-            for entry in &self.entries {
-                let [x0, y0, x1, y1] = entry.bounds;
-                let rect = egui::Rect::from_min_max(screen([x0, y0]), screen([x1, y1]));
-                let response = ui.interact(
-                    rect.intersect(page),
-                    ui.id().with(("annotation", entry.xref)),
-                    egui::Sense::click(),
-                );
-                if response.clicked() {
-                    self.selected = Some(entry.xref);
-                    self.contents = entry.contents.clone();
-                    self.colour = entry.colour;
-                    self.width = entry.width.clamp(0.5, 20.0);
-                }
-                response.on_hover_text(format!("{}: {}", entry.kind.label(), entry.contents));
-                if self.selected == Some(entry.xref) {
-                    ui.painter().rect_stroke(
-                        rect.expand(3.0),
-                        0.0,
-                        egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(45, 130, 240)),
-                        egui::StrokeKind::Outside,
+            for &(number, page) in pages {
+                let entries = document.annotations(number)?;
+                for entry in &entries {
+                    let [x0, y0, x1, y1] = entry.bounds;
+                    let rect = page.bounds(egui::Rect::from_min_max(
+                        egui::pos2(x0, y0),
+                        egui::pos2(x1, y1),
+                    ));
+                    let response = ui.interact(
+                        rect,
+                        ui.id().with(("annotation", number, entry.xref)),
+                        egui::Sense::click(),
                     );
+                    if response.clicked() {
+                        self.selected = Some(entry.xref);
+                        self.contents = entry.contents.clone();
+                        self.colour = entry.colour;
+                        self.width = entry.width.clamp(0.5, 20.0);
+                    }
+                    response.on_hover_text(format!("{}: {}", entry.kind.label(), entry.contents));
+                    if self.selected == Some(entry.xref) {
+                        ui.painter().rect_stroke(
+                            rect.expand(3.0),
+                            0.0,
+                            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(45, 130, 240)),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
                 }
             }
         }
@@ -580,6 +597,71 @@ mod tests {
     use super::*;
     use crate::document::tests::{encrypted_fixture, sample_document, sample_pdf};
     use mupdf::pdf::{Encryption, Permission};
+
+    #[test]
+    fn rotated_note_canvas_maps_asymmetric_screen_clicks_to_original_pdf_points() {
+        use crate::layout::{PageTransform, Rotation};
+        for (rotation, size, click) in [
+            (Rotation::None, [600.0, 800.0], [191.0, 577.0]),
+            (Rotation::Clockwise, [800.0, 600.0], [325.0, 235.0]),
+            (Rotation::Half, [600.0, 800.0], [467.0, 369.0]),
+            (Rotation::Counterclockwise, [800.0, 600.0], [533.0, 511.0]),
+        ] {
+            let mut document = sample_document();
+            let mut annotations = AnnotationUi {
+                open: true,
+                tool: Some(Kind::Note),
+                ..Default::default()
+            };
+            let context = egui::Context::default();
+            let page = PageTransform {
+                rect: egui::Rect::from_min_size(egui::pos2(29.0, 73.0), size.into()),
+                rotation,
+            };
+            let click = egui::Pos2::from(click);
+            let mut edits = 0;
+            for pressed in [None, Some(true), Some(false)] {
+                let mut events = vec![egui::Event::PointerMoved(click)];
+                if let Some(pressed) = pressed {
+                    events.push(egui::Event::PointerButton {
+                        pos: click,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                let _ = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1280.0, 900.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        annotations
+                            .page_ui(ui, &mut document, &[(0, page)], || edits += 1)
+                            .unwrap();
+                    },
+                );
+            }
+            assert_eq!(edits, 1);
+            let notes = document.annotations(0).unwrap();
+            assert_eq!(notes.len(), 1);
+            // The icon's bounds begin at the requested original-page point.
+            assert!(
+                (notes[0].bounds[0] - 0.27).abs() < 0.001,
+                "{rotation:?}: {:?}",
+                notes[0].bounds
+            );
+            assert!(
+                (notes[0].bounds[1] - 0.63).abs() < 0.001,
+                "{rotation:?}: {:?}",
+                notes[0].bounds
+            );
+        }
+    }
 
     #[test]
     fn disabled_canvas_discards_partial_ink_without_editing() {
@@ -606,7 +688,18 @@ mod tests {
             root.disable();
             assert!(
                 !annotations
-                    .page_ui(root, &mut document, root.max_rect(), || {})
+                    .page_ui(
+                        root,
+                        &mut document,
+                        &[(
+                            0,
+                            crate::layout::PageTransform {
+                                rect: root.max_rect(),
+                                rotation: Default::default()
+                            }
+                        )],
+                        || {}
+                    )
                     .unwrap()
             );
         });

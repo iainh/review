@@ -4,6 +4,7 @@ mod annotations;
 mod document;
 mod inspection;
 mod inspector;
+mod layout;
 mod library;
 mod links;
 #[cfg(target_os = "macos")]
@@ -14,6 +15,7 @@ mod ocr;
 mod page_text;
 mod persistence;
 mod printing;
+mod reading;
 mod render_worker;
 mod renderer;
 mod search;
@@ -865,6 +867,7 @@ mod tests {
                 page: 1,
                 scroll: [17.0, 93.0],
                 zoom: zoom::Zoom::Percent(2.0),
+                ..Default::default()
             };
             let bookmark = persistence::Bookmark {
                 path: target.clone(),
@@ -1337,6 +1340,7 @@ mod tests {
             page: 1,
             scroll: [13.0, 29.0],
             zoom: zoom::Zoom::Percent(1.25),
+            ..Default::default()
         };
         app.viewer.as_mut().unwrap().restore_reading(&location);
         let saved_state = app.store.state.clone();
@@ -1448,6 +1452,7 @@ mod tests {
             page: 1,
             scroll: [73.0, 129.0],
             zoom: zoom::Zoom::Percent(2.75),
+            ..Default::default()
         };
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         app.open(path.clone());
@@ -1517,11 +1522,13 @@ mod tests {
             page: 1,
             scroll: [49.0, 213.0],
             zoom: zoom::Zoom::Percent(3.75),
+            ..Default::default()
         };
         let bookmark = ReadingState {
             page: 0,
             scroll: [17.0, 87.0],
             zoom: zoom::Zoom::Percent(2.25),
+            ..Default::default()
         };
         let mut store = Store::temporary(directory.path());
         store
@@ -1565,12 +1572,10 @@ mod tests {
         app.submit_password();
         assert_eq!(app.viewer.as_ref().unwrap().reading_state(), recent);
         app.open(plain);
+        let plain_reading = app.viewer.as_ref().unwrap().reading_state();
         app.open_bookmark(app.store.state.bookmarks[0].clone());
         assert!(app.password_prompt.is_some());
-        assert_eq!(
-            app.viewer.as_ref().unwrap().reading_state(),
-            ReadingState::default()
-        );
+        assert_eq!(app.viewer.as_ref().unwrap().reading_state(), plain_reading);
         app.password_prompt
             .as_mut()
             .unwrap()

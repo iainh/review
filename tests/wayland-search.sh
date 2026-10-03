@@ -39,8 +39,8 @@ open_pdf() {
 }
 key() { wtype -s 150 -k "$1" -s 150; }
 query() { wtype -s 150 -M ctrl -k f -m ctrl -s 150 "$1" -s 150 -k Return -s 150; }
-# Search content follows the additional annotation toolbar row.
-click_search() { "$scratch/pointer" click "$1" "$(($2 + 22))"; }
+# Search content follows the annotation and reading-layout toolbar rows.
+click_search() { "$scratch/pointer" click "$1" "$(($2 + 44))"; }
 capture() {
     if [[ -n ${REVIEW_SCREENSHOTS:-} ]]; then
         mkdir -p "$REVIEW_SCREENSHOTS"
