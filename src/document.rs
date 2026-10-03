@@ -215,7 +215,8 @@ pub(crate) mod tests {
         assert!(document.render_page(1, (244, 244), 1.0).is_ok());
     }
 
-    #[cfg(unix)]
+    // APFS rejects invalid UTF-8 filenames before Review can open them.
+    #[cfg(target_os = "linux")]
     #[test]
     fn opens_pdf_with_non_utf8_filename() {
         use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
