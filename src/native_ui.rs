@@ -149,6 +149,7 @@ impl NativeUi {
                     (format!("{primary}+G"), "Go to page field"),
                     (format!("{primary}+L"), "Select zoom percentage field"),
                     (format!("{primary}+F"), "Find in document"),
+                    (format!("{primary}+D"), "Show / hide document properties"),
                     ("Enter / Shift+Enter".into(), "Next / previous match in search field"),
                     ("F3 / Shift+F3".into(), "Next / previous match"),
                     ("Left / Page Up, Right / Page Down".into(), "Previous / next page¹"),

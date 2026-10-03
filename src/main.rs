@@ -1,6 +1,8 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod document;
+mod inspection;
+mod inspector;
 mod links;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -251,6 +253,18 @@ impl ApplicationHandler<AppEvent> for App {
                     if let Some(path) = dialog.pick_file() {
                         self.open(path);
                     }
+                } else if let Some(viewer) = &mut self.viewer
+                    && let Some((index, filename)) = viewer.inspector.take_save_request()
+                {
+                    let dialog = rfd::FileDialog::new()
+                        .set_title("Save attachment (will not open)")
+                        .set_file_name(filename);
+                    #[cfg(not(target_os = "linux"))]
+                    let dialog = dialog.set_parent(renderer.window());
+                    if let Some(path) = dialog.save_file() {
+                        viewer.save_attachment(index, &path);
+                    }
+                    renderer.window().request_redraw();
                 }
             }
             _ => {}

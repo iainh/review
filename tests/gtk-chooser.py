@@ -41,7 +41,7 @@ if operation != "cancel":
     assert entry.queryAction().doAction(0)  # activate the location entry
     time.sleep(0.5)
 
-names = ("Cancel",) if operation == "cancel" else ("OK", "Open", "Select")
+names = ("Cancel",) if operation == "cancel" else ("OK", "Open", "Select", "Save")
 button = next(
     (
         node

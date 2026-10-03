@@ -11,6 +11,10 @@ pub struct PageText {
 }
 
 impl PageText {
+    pub fn invalidate(&mut self) {
+        self.cached = None;
+    }
+
     pub fn toggle(&mut self, ctx: &egui::Context) {
         self.open = !self.open;
         self.focus = self.open;

@@ -26,6 +26,10 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
+    pub fn clear_previews(&mut self) {
+        self.thumbnails.clear();
+    }
+
     pub fn new(document: &PdfDocument) -> Self {
         Self {
             open: true,
@@ -70,13 +74,7 @@ impl Sidebar {
                         }
                         Ok(outline) => {
                             egui::ScrollArea::vertical().show(ui, |ui| {
-                                outline_rows(
-                                    ui,
-                                    outline,
-                                    document.current_page(),
-                                    document.page_count(),
-                                    &mut destination,
-                                );
+                                outline_rows(ui, outline, document, &mut destination);
                             });
                         }
                         Err(error) => {
@@ -190,19 +188,40 @@ impl Sidebar {
                         );
                     }
                 }
-                ui.painter().text(
-                    egui::pos2(rect.center().x, rect.bottom() - 12.0),
-                    egui::Align2::CENTER_CENTER,
-                    format!("Page {}", page + 1),
+                let physical = (page + 1).to_string();
+                let caption = document
+                    .page_label(page)
+                    .ok()
+                    .filter(|label| !label.is_empty() && *label != physical)
+                    .map_or_else(
+                        || format!("Page {physical}"),
+                        |label| format!("Page {physical} · {label}"),
+                    );
+                // Elide long labels after the physical number, never across it.
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    caption,
                     egui::FontId::proportional(13.0),
                     ui.visuals().text_color(),
                 );
+                job.wrap.max_width = rect.width() - 20.0;
+                job.wrap.max_rows = 1;
+                job.wrap.break_anywhere = true;
+                let galley = ui.painter().layout_job(job);
+                let position = egui::pos2(
+                    rect.center().x - galley.size().x / 2.0,
+                    rect.bottom() - 20.0,
+                );
+                ui.painter()
+                    .galley(position, galley, ui.visuals().text_color());
+                response
+                    .clone()
+                    .on_hover_text(document.page_description(page));
                 response.widget_info(|| {
                     egui::WidgetInfo::selected(
                         egui::WidgetType::Button,
                         true,
                         current == page,
-                        format!("Page {}", page + 1),
+                        document.page_description(page),
                     )
                 });
                 if response.clicked() {
@@ -217,8 +236,7 @@ impl Sidebar {
 fn outline_rows(
     ui: &mut egui::Ui,
     entries: &[Outline],
-    current: usize,
-    count: usize,
+    document: &PdfDocument,
     destination: &mut Option<SidebarTarget>,
 ) {
     for (index, entry) in entries.iter().enumerate() {
@@ -226,16 +244,19 @@ fn outline_rows(
             let page = entry
                 .dest
                 .map(|dest| dest.loc.page_number as usize)
-                .filter(|&page| page < count);
+                .filter(|&page| page < document.page_count());
             let mut label = |ui: &mut egui::Ui| {
                 let text = match page {
-                    Some(page) => format!("{}  ·  {}", entry.title, page + 1),
+                    Some(page) => {
+                        format!("{}  ·  {}", entry.title, document.page_description(page))
+                    }
                     None => entry.title.clone(),
                 };
                 if ui
                     .add_enabled(
                         page.is_some(),
-                        egui::Button::selectable(page == Some(current), text).wrap(),
+                        egui::Button::selectable(page == Some(document.current_page()), text)
+                            .wrap(),
                     )
                     .clicked()
                 {
@@ -252,7 +273,7 @@ fn outline_rows(
                     true,
                 );
                 let (toggle, _, _) = state.show_header(ui, label).body(|ui| {
-                    outline_rows(ui, &entry.down, current, count, destination);
+                    outline_rows(ui, &entry.down, document, destination);
                 });
                 let open = egui::collapsing_header::CollapsingState::load(ui.ctx(), id)
                     .unwrap()

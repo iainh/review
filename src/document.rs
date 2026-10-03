@@ -23,6 +23,9 @@ pub struct SearchMatch {
 
 pub struct PdfDocument {
     document: mupdf::pdf::PdfDocument,
+    // A fresh, unsaved copy for layer visibility. Inspection always uses source.
+    layer_document: Option<mupdf::pdf::PdfDocument>,
+    layer_settings: Vec<(i32, bool)>,
     path: PathBuf,
     page_count: usize,
     current_page: usize,
@@ -42,12 +45,20 @@ pub struct PdfPermissions {
 pub struct WorkerSource {
     path: PathBuf,
     password: Option<Arc<Zeroizing<String>>>,
+    layers: Vec<(i32, bool)>,
 }
 
 impl WorkerSource {
     pub fn open(&self) -> Result<PdfDocument> {
-        PdfDocument::open_with_password(&self.path, self.password.as_deref().map(|p| p.as_str()))?
-            .context("PDF password changed; reopen the document")
+        let mut document = PdfDocument::open_with_password(
+            &self.path,
+            self.password.as_deref().map(|p| p.as_str()),
+        )?
+        .context("PDF password changed; reopen the document")?;
+        if !self.layers.is_empty() {
+            document.apply_layer_visibility(&self.layers)?;
+        }
+        Ok(document)
     }
 }
 
@@ -102,6 +113,8 @@ impl PdfDocument {
 
         Ok(Some(Self {
             document,
+            layer_document: None,
+            layer_settings: Vec::new(),
             path,
             page_count,
             current_page: 0,
@@ -124,6 +137,7 @@ impl PdfDocument {
         WorkerSource {
             path: self.path.clone(),
             password: self.session_password.clone(),
+            layers: self.layer_settings.clone(),
         }
     }
 
@@ -151,7 +165,7 @@ impl PdfDocument {
     pub fn print_page(&self, page: usize) -> Result<mupdf::Page> {
         ensure!(self.permissions().print, "This PDF does not allow printing");
         ensure!(page < self.page_count, "print page is out of range");
-        self.document
+        self.rendering_document()
             .load_page(page as i32)
             .context("failed to load print page")
     }
@@ -220,6 +234,90 @@ impl PdfDocument {
         std::fs::read(&path).context("Failed to read print PDF")
     }
 
+    pub fn pdf(&self) -> &mupdf::pdf::PdfDocument {
+        &self.document
+    }
+
+    fn rendering_document(&self) -> &Document {
+        self.layer_document.as_deref().unwrap_or(&self.document)
+    }
+
+    pub fn page_label(&self, page: usize) -> Result<String> {
+        ensure!(page < self.page_count, "page is out of range");
+        Ok(self.document.page_label(page)?)
+    }
+
+    pub fn page_description(&self, page: usize) -> String {
+        let physical = (page + 1).to_string();
+        match self.page_label(page) {
+            Ok(label) if !label.is_empty() && label != physical => {
+                format!("{label} (page {physical})")
+            }
+            _ => format!("Page {physical}"),
+        }
+    }
+
+    pub fn resolve_page(&self, input: &str) -> Result<usize> {
+        let input = input.trim();
+        // Numeric input always means physical page, even for numeric PDF labels.
+        if !input.is_empty() && input.bytes().all(|c| c.is_ascii_digit()) {
+            let number = input
+                .parse::<usize>()
+                .context("Invalid physical page number")?;
+            ensure!(
+                (1..=self.page_count).contains(&number),
+                "Enter a physical page from 1 to {}",
+                self.page_count
+            );
+            return Ok(number - 1);
+        }
+        ensure!(
+            !input.is_empty(),
+            "Enter a physical page number or PDF label"
+        );
+        let pdf = &self.document;
+        let mut destination = None;
+        for page in 0..self.page_count {
+            if pdf.page_label(page)? == input {
+                ensure!(
+                    destination.is_none(),
+                    "Label {input} is ambiguous; use a physical page number"
+                );
+                destination = Some(page);
+            }
+        }
+        destination.with_context(|| {
+            format!("No page label {input}; enter a physical page number or exact PDF label")
+        })
+    }
+
+    pub fn set_layer_visibility(&mut self, layers: &[crate::inspection::Layer]) -> Result<()> {
+        let settings: Vec<_> = layers
+            .iter()
+            .filter(|layer| layer.controllable)
+            .map(|layer| (layer.reference.xref(), layer.enabled))
+            .collect();
+        self.apply_layer_visibility(&settings)
+    }
+
+    fn apply_layer_visibility(&mut self, settings: &[(i32, bool)]) -> Result<()> {
+        // mupdf-rs's setter edits /D/ON and /D/OFF, but does not reset MuPDF's
+        // runtime OCG cache. Recreate a rendering-only document before loading
+        // any pages. Never write this copy back to the original file.
+        let mut bytes = Zeroizing::new(Vec::new());
+        let mut options = mupdf::pdf::PdfWriteOptions::default();
+        options.set_encryption(mupdf::pdf::Encryption::None);
+        self.document.write_to_with_options(&mut *bytes, options)?;
+        let mut copy = mupdf::pdf::PdfDocument::from_bytes(&bytes)?;
+        copy.disable_js()?;
+        for &(xref, enabled) in settings {
+            copy.set_optional_content_enabled(mupdf::pdf::OptionalContentRef::new(xref)?, enabled)?;
+        }
+        self.layer_document = Some(copy);
+        self.layer_settings = settings.to_vec();
+        Ok(())
+    }
+
     pub fn go_to_page(&mut self, page: usize) -> bool {
         if page >= self.page_count || page == self.current_page {
             return false;
@@ -237,7 +335,7 @@ impl PdfDocument {
     /// must independently enforce their respective document permissions.
     pub fn structured_text(&self, page_number: usize) -> Result<crate::structured_text::PageText> {
         ensure!(page_number < self.page_count, "page is out of range");
-        let page = self.document.load_page(page_number as i32)?;
+        let page = self.rendering_document().load_page(page_number as i32)?;
         let bounds = page.bounds()?;
         let text = page.to_text_page(TextPageFlags::SEGMENT | TextPageFlags::PARAGRAPH_BREAK)?;
         crate::structured_text::PageText::from_xml(&text.to_xml(page_number as i32)?, bounds)
@@ -255,7 +353,7 @@ impl PdfDocument {
         }
         let page_label = page_number + 1;
         let page = self
-            .document
+            .rendering_document()
             .load_page(page_number as i32)
             .with_context(|| format!("failed to load page {page_label}"))?;
         let bounds = page
@@ -306,7 +404,10 @@ impl PdfDocument {
 
     pub fn page_size(&self, page_number: usize) -> Result<(f32, f32)> {
         ensure!(page_number < self.page_count, "page is out of range");
-        let bounds = self.document.load_page(page_number as i32)?.bounds()?;
+        let bounds = self
+            .rendering_document()
+            .load_page(page_number as i32)?
+            .bounds()?;
         let size = (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
         ensure!(size.0 > 0.0 && size.1 > 0.0, "page has invalid bounds");
         Ok(size)
@@ -328,7 +429,7 @@ impl PdfDocument {
         ensure!(scale.is_finite() && scale > 0.0, "invalid rendering scale");
         let page_label = page_number + 1;
         let page = self
-            .document
+            .rendering_document()
             .load_page(page_number as i32)
             .with_context(|| format!("failed to load page {page_label}"))?;
         let bounds = page
@@ -564,6 +665,8 @@ pub(crate) mod tests {
                 mupdf::Document::from_bytes(&sample_pdf(text, false), "application/pdf").unwrap(),
             )
             .unwrap(),
+            layer_document: None,
+            layer_settings: Vec::new(),
             path: "sample.pdf".into(),
             page_count: 2,
             current_page: 0,

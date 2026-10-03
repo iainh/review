@@ -47,8 +47,11 @@ display their effective percentage. Very large page renders report a memory
 limit error instead of allocating an unbounded image.
 
 Use **Ctrl+G** (**Cmd+G** on macOS) to select the page field. Enter a page
-number and press **Enter** or click **Go**. Page numbers start at one; invalid
-numbers leave the current page unchanged. **Escape** cancels page editing.
+number or exact PDF page label, such as `iv` or `A-1`, then press **Enter** or
+click **Go**. Numbers always select physical pages, starting at one. Labels
+appear beside physical numbers in the toolbar, title, outline and previews.
+Invalid or duplicate labels leave the current page unchanged; use a physical
+number to disambiguate. **Escape** cancels page editing.
 
 Use **Ctrl+F** (**Cmd+F** on macOS) or **Search** to find text. Press **Enter**
 or click **Find** to search the document, ignoring case. **Enter**/**F3**
@@ -157,6 +160,32 @@ accessible semantic document. Scans without a text layer show an explicit
 no-text message; Review does not perform OCR. The raster page itself has no
 screen-reader text navigation. Linux AT-SPI text, focus and action integration
 are tested; VoiceOver, Narrator and NVDA need native-platform manual validation.
+
+## Document inspection
+
+Use **Properties** or **Ctrl+D** (**Cmd+D** on macOS) to inspect metadata, page
+dimensions, attachments, layers and signatures. **Escape** closes the inspector.
+Metadata dates are shown as stored in the PDF. The MuPDF label binding returns
+at most 127 UTF-8 bytes; physical page numbers remain authoritative.
+
+Attachments in the embedded-files name tree, including nested entries, can be
+explicitly saved with **Save as…**. Review never opens the saved file and rejects
+replacing the open PDF. Annotation-only attachments and associated-file arrays
+are not enumerated. Saving checks declared and decoded sizes against 64 MiB,
+but the binding decodes an entire stream in memory, so this is not a strict
+decompression-memory limit. Treat embedded files as untrusted.
+
+Layer checkboxes change the default configuration for this viewing session;
+they never save the PDF. Locked layers and radio/usage-controlled configurations
+are read-only. The safe binding has no runtime layer API: Review rebuilds an
+in-memory rendering copy after changes, which may be slow for large documents.
+
+Signature inspection reads AcroForm fields, including invisible fields.
+**Signature present does not mean valid or trusted.** Review does not verify
+digests, certificate chains, revocation, timestamps or post-signing changes;
+the safe binding exposes no cryptographic verifier. Claimed signer names and
+dates are unverified. Document timestamps outside the AcroForm tree are not
+enumerated. Document JavaScript and file-launch actions remain disabled.
 
 ## Downloads
 
@@ -269,6 +298,9 @@ session described below. It requires a GTK file-chooser portal or Zenity and
 `bash tests/wayland-password.sh` uses the same session and chooser workflow to
 check masked password entry, retry, keyboard and button cancellation, preserved
 navigation, owner access and permission notices with synthetic encrypted PDFs.
+`bash tests/wayland-inspection.sh` checks label navigation, inspector tabs,
+rendered layer toggles and explicit attachment saving/cancellation using a
+synthetic PDF. It additionally requires ImageMagick for pixel checks.
 
 `bash tests/wayland-print.sh` checks the print modal, native range and orientation
 controls, cancellation and local PDF export in the same disposable Sway session.

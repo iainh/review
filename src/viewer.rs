@@ -2,6 +2,7 @@ use egui::{Color32, Context, Key, Modifiers, TextureHandle, Vec2};
 
 use crate::{
     document::PdfDocument,
+    inspector::Inspector,
     links::{self, LinkTarget, PageLink},
     navigation::{History, ViewState, destination_view},
     page_text::PageText,
@@ -35,6 +36,7 @@ pub struct Viewer {
     viewport: [f32; 2],
     links: Vec<PageLink>,
     links_page: Option<usize>,
+    pub inspector: Inspector,
 }
 
 impl Viewer {
@@ -63,15 +65,25 @@ impl Viewer {
             viewport: [960.0, 720.0],
             links: Vec::new(),
             links_page: None,
+            inspector: Inspector::default(),
         }
     }
 
     pub fn title(&self) -> String {
+        let label = self
+            .document
+            .page_label(self.document.current_page())
+            .ok()
+            .filter(|label| {
+                !label.is_empty() && *label != (self.document.current_page() + 1).to_string()
+            })
+            .map_or_else(String::new, |label| format!(" [{label}]"));
         format!(
-            "Review — {} — {}/{} — {}",
+            "Review — {} — {}/{}{} — {}",
             self.document.name(),
             self.document.current_page() + 1,
             self.document.page_count(),
+            label,
             self.zoom.label()
         )
     }
@@ -137,6 +149,11 @@ impl Viewer {
         }
     }
 
+    pub fn save_attachment(&mut self, index: usize, path: &std::path::Path) {
+        self.inspector
+            .save_attachment(index, path, self.document.path());
+    }
+
     fn go_to_page(&mut self, page: usize) {
         if page < self.document.page_count() && page != self.document.current_page() {
             self.visit(ViewState {
@@ -163,14 +180,9 @@ impl Viewer {
     }
 
     fn submit_page(&mut self) {
-        match parse_page(&self.page_input, self.document.page_count()) {
-            Some(page) => self.go_to_page(page),
-            None => {
-                self.error = Some(format!(
-                    "Enter a page from 1 to {}",
-                    self.document.page_count()
-                ))
-            }
+        match self.document.resolve_page(&self.page_input) {
+            Ok(page) => self.go_to_page(page),
+            Err(error) => self.error = Some(format!("{error:#}")),
         }
     }
 
@@ -220,6 +232,15 @@ impl Viewer {
             shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::G));
         let mut focus_zoom =
             shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::L));
+        if shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::D)) {
+            self.inspector.open = !self.inspector.open;
+        }
+        if shortcuts
+            && self.inspector.open
+            && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.inspector.open = false;
+        }
         if shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F9)) {
             self.sidebar.open = !self.sidebar.open;
         }
@@ -340,7 +361,8 @@ impl Viewer {
                             .id(egui::Id::new("page_input"))
                             .desired_width(48.0),
                     )
-                    .labelled_by(page_label.id);
+                    .labelled_by(page_label.id)
+                    .on_hover_text("Physical page number or exact PDF label (Ctrl+G / Cmd+G). Numbers always select physical pages.");
                 if focus_page {
                     select_text(&ctx, &field, self.page_input.chars().count());
                 }
@@ -356,6 +378,10 @@ impl Viewer {
                 {
                     field.surrender_focus();
                     self.go_to_page(self.document.current_page());
+                }
+                if let Ok(label) = self.document.page_label(self.document.current_page())
+                    && !label.is_empty() && label != (self.document.current_page() + 1).to_string() {
+                    ui.label(format!("Label: {label}"));
                 }
                 ui.separator();
                 let zoom_out = ui.button("−").on_hover_text("Zoom out");
@@ -466,6 +492,9 @@ impl Viewer {
                 {
                     self.navigate_history(false);
                 }
+                if ui.selectable_label(self.inspector.open, "Properties").on_hover_text("Ctrl+D / Cmd+D").clicked() {
+                    self.inspector.open = !self.inspector.open;
+                }
             });
             let permissions = self.document.permissions();
             if !permissions.print || !permissions.print_high_quality || !permissions.copy {
@@ -559,7 +588,7 @@ impl Viewer {
         }
         // Unmodified document keys must not steal arrows or editing keys from
         // focused controls. Modified app commands are handled above.
-        if shortcuts && ctx.memory(|memory| memory.focused().is_none()) {
+        if shortcuts && !self.inspector.open && ctx.memory(|memory| memory.focused().is_none()) {
             let previous = (self.document.current_page(), self.zoom);
             ctx.input_mut(|input| {
                 if input.consume_key(Modifiers::NONE, Key::ArrowLeft)
@@ -789,6 +818,17 @@ impl Viewer {
                 ctx.request_repaint();
             }
         });
+        if shortcuts && self.inspector.ui(&ctx, &mut self.document) {
+            self.render_worker = RenderWorker::new(self.document.worker_source());
+            self.rendered = None;
+            self.page_texture = None;
+            self.sidebar.clear_previews();
+            self.search.clear_results();
+            self.selection.clear();
+            self.page_text.invalidate();
+            self.links_page = None;
+            ctx.request_repaint();
+        }
         self.render_worker.end_frame(&ctx);
         if let Some(events) = print_input {
             ctx.input_mut(|input| input.events = events);
@@ -797,15 +837,6 @@ impl Viewer {
             self.printing.ui(&ctx, &self.document);
         }
     }
-}
-
-fn parse_page(input: &str, count: usize) -> Option<usize> {
-    input
-        .trim()
-        .parse::<usize>()
-        .ok()
-        .filter(|page| (1..=count).contains(page))
-        .map(|page| page - 1)
 }
 
 fn select_text(ctx: &Context, response: &egui::Response, len: usize) {
@@ -826,7 +857,7 @@ fn select_text(ctx: &Context, response: &egui::Response, len: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Viewer, parse_page};
+    use super::Viewer;
 
     fn frame(
         viewer: &mut Viewer,
@@ -1321,19 +1352,11 @@ mod tests {
 
     #[test]
     fn page_numbers_are_one_based_and_checked() {
-        assert_eq!(parse_page("1", 45), Some(0));
-        assert_eq!(parse_page(" 17 ", 45), Some(16));
-        assert_eq!(parse_page("45", 45), Some(44));
-        for input in [
-            "0",
-            "46",
-            "-1",
-            "1.5",
-            "abc",
-            "",
-            "999999999999999999999999",
-        ] {
-            assert_eq!(parse_page(input, 45), None, "{input}");
+        let document = crate::document::tests::sample_document();
+        assert_eq!(document.resolve_page("1").unwrap(), 0);
+        assert_eq!(document.resolve_page(" 2 ").unwrap(), 1);
+        for input in ["0", "3", "-1", "1.5", "abc", "", "999999999999999999999999"] {
+            assert!(document.resolve_page(input).is_err(), "{input}");
         }
     }
 }
