@@ -648,6 +648,87 @@ impl PdfDocument {
             rgba: rgb_to_rgba(pixmap.samples()),
         })
     }
+
+    /// Rasterize a bounded rectangle in scaled, page-local pixels. Allocate
+    /// only this region, never a full-page pixmap (even for enormous pages).
+    pub fn render_region(
+        &self,
+        page_number: usize,
+        scale: f32,
+        region: [u32; 4],
+    ) -> Result<PageImage> {
+        ensure!(page_number < self.page_count, "page is out of range");
+        ensure!(scale.is_finite() && scale > 0.0, "invalid rendering scale");
+        let [x0, y0, x1, y1] = region;
+        ensure!(
+            x0 < x1 && y0 < y1 && x1 <= i32::MAX as u32 && y1 <= i32::MAX as u32,
+            "invalid rendering region"
+        );
+        ensure!(
+            u64::from(x1 - x0) * u64::from(y1 - y0) <= 64_000_000,
+            "rendering region exceeds the memory limit"
+        );
+        let page = self.rendering_document().load_page(page_number as i32)?;
+        let bounds = page.bounds()?;
+        let width = (f64::from(bounds.x1 - bounds.x0) * f64::from(scale)).ceil();
+        let height = (f64::from(bounds.y1 - bounds.y0) * f64::from(scale)).ceil();
+        ensure!(
+            x1 as f64 <= width && y1 as f64 <= height,
+            "rendering region is outside the page"
+        );
+        // MuPDF's scan conversion can change its last clipped pixel. Render
+        // two guard pixels beyond the returned overlap, then discard them.
+        let left = x0.saturating_sub(2);
+        let top = y0.saturating_sub(2);
+        let right = x1.saturating_add(2).min(width as u32);
+        let bottom = y1.saturating_add(2).min(height as u32);
+        ensure!(
+            u64::from(right - left) * u64::from(bottom - top) <= 64_000_000,
+            "rendering region exceeds the memory limit"
+        );
+        let mut pixmap = mupdf::Pixmap::new(
+            &Colorspace::device_rgb(),
+            left as i32,
+            top as i32,
+            (right - left) as i32,
+            (bottom - top) as i32,
+            false,
+        )?;
+        pixmap.clear_with(255)?;
+        let device = mupdf::Device::from_pixmap(&pixmap)?;
+        // The transform is identical for every tile, including fractional
+        // scales. Nonzero native bounds are normalized exactly once here.
+        page.run(&device, &page_raster_matrix(bounds, scale))?;
+        drop(device);
+        ensure!(pixmap.n() == 3, "MuPDF returned an unexpected pixel format");
+        let samples = pixmap.samples();
+        let mut rgba = Vec::with_capacity((x1 - x0) as usize * (y1 - y0) as usize * 4);
+        for y in y0..y1 {
+            let start = ((y - top) as usize * (right - left) as usize + (x0 - left) as usize) * 3;
+            for pixel in samples[start..start + (x1 - x0) as usize * 3]
+                .as_chunks::<3>()
+                .0
+            {
+                rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+            }
+        }
+        Ok(PageImage {
+            width: x1 - x0,
+            height: y1 - y0,
+            rgba,
+        })
+    }
+}
+
+fn page_raster_matrix(bounds: mupdf::Rect, scale: f32) -> Matrix {
+    Matrix::new(
+        scale,
+        0.0,
+        0.0,
+        scale,
+        -bounds.x0 * scale,
+        -bounds.y0 * scale,
+    )
 }
 
 fn fit_scale(viewport: (u32, u32), page: (f32, f32), zoom: f32) -> f32 {
@@ -889,6 +970,28 @@ pub(crate) mod tests {
                 "<< /Title (Nested chapter two) /Parent 9 0 R /Dest [4 0 R /Fit] >>".to_string(),
             ]);
         }
+        pdf_objects(&objects)
+    }
+
+    pub(crate) fn huge_pdf() -> Vec<u8> {
+        let content = "q 1 0 0 -1 10 12020 cm \
+            0.15 0.6 0.8 rg 40 200 1600 300 re f \
+            0 0 0 RG 3 w 40 210 m 1600 480 l S \
+            0 0 0 rg BT /F1 24 Tf 1 0 0 -1 80 120 Tm (Jump farther) Tj ET \
+            BT /F1 32 Tf 1 0 0 -1 620 280 Tm (Tile crossing) Tj ET \
+            0.7 0.2 0.3 rg 3900 2850 900 500 re f \
+            0 0 0 rg BT /F1 24 Tf 1 0 0 -1 4000 3000 Tm (Distant needle) Tj ET Q";
+        pdf_objects(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [10 20 20010 12020] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /Annots [6 0 R] >>".into(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+            "<< /Type /Annot /Subtype /Link /Rect [90 11888 290 11925] /Border [0 0 0] /Dest [3 0 R /XYZ 3910 9130 1] >>".into(),
+        ])
+    }
+
+    pub(crate) fn pdf_objects(objects: &[String]) -> Vec<u8> {
         let mut pdf = "%PDF-1.4\n".to_string();
         let mut offsets = vec![0];
         for (index, object) in objects.iter().enumerate() {
@@ -1082,6 +1185,51 @@ pub(crate) mod tests {
                 .iter()
                 .any(|pixel| pixel[0] < 128)
         );
+    }
+
+    #[test]
+    fn raster_matrix_normalizes_asymmetric_nonzero_native_bounds() {
+        let matrix = super::page_raster_matrix(mupdf::Rect::new(-37.25, 81.5, 262.75, 481.5), 1.5);
+        assert_eq!(
+            mupdf::Point::new(-37.25, 81.5).transform(&matrix),
+            mupdf::Point::new(0.0, 0.0)
+        );
+        assert_eq!(
+            mupdf::Point::new(262.75, 481.5).transform(&matrix),
+            mupdf::Point::new(450.0, 600.0)
+        );
+        assert_eq!(
+            mupdf::Point::new(12.75, 201.5).transform(&matrix),
+            mupdf::Point::new(75.0, 180.0)
+        );
+    }
+
+    #[test]
+    fn huge_region_is_bounded_and_keeps_native_text_and_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("huge.pdf");
+        std::fs::write(&path, huge_pdf()).unwrap();
+        let document = PdfDocument::open(path).unwrap();
+        assert_eq!(document.page_size(0).unwrap(), (20_000.0, 12_000.0));
+        assert!(document.render_at_scale(0, 1.0).is_err());
+        let image = document
+            .render_region(0, 16.0, [63_900, 47_500, 64_400, 48_300])
+            .unwrap();
+        assert_eq!((image.width, image.height), (500, 800));
+        assert_eq!(image.rgba.len(), 500 * 800 * 4);
+        assert!(image.rgba.as_chunks::<4>().0.iter().any(|p| p[0] < 128));
+        assert_eq!(document.search_page(0, "Distant needle").unwrap().len(), 1);
+        assert_eq!(document.links(0).unwrap().len(), 1);
+        for region in [[4, 5, 4, 10], [0, 0, 20_001, 2], [0, 0, u32::MAX, 5]] {
+            assert!(document.render_region(0, 1.0, region).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "exports a huge page to REVIEW_FIXTURE_DIR for native tile tests"]
+    fn export_tiles_fixture() {
+        let directory = std::path::PathBuf::from(std::env::var("REVIEW_FIXTURE_DIR").unwrap());
+        std::fs::write(directory.join("huge.pdf"), huge_pdf()).unwrap();
     }
 
     #[test]
