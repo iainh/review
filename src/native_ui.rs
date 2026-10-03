@@ -144,6 +144,8 @@ impl NativeUi {
             egui::Grid::new("shortcuts").spacing([24.0, 6.0]).show(ui, |ui| {
                 for (keys, action) in [
                     (format!("{primary}+O"), "Open PDF"),
+                    (format!("{primary}+S / {primary}+Shift+S"), "Save / Save As"),
+                    (format!("{primary}+Z / {primary}+Shift+Z"), "Undo / redo document edit (outside text fields)"),
                     (format!("{primary}+P"), "Print PDF"),
                     (format!("{primary}+Q / {primary}+W"), "Close window"),
                     (format!("{primary}+G"), "Go to page field"),

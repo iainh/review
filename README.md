@@ -125,7 +125,7 @@ menu use recognized text only when PDF copy permission allows it. There is no
 separate OCR export that bypasses that permission. The **Page text** pane remains
 available for assistive reading when copying is disabled.
 
-OCR text stays in this session. Review does not change or save the original PDF,
+OCR text stays in this session. Recognition does not change or save the original PDF,
 create a sidecar or add a persistent text layer. Reopening the PDF loses OCR text.
 Changing visible PDF layers or editing the document clears session OCR text.
 Tesseract word boxes are subdivided into approximate grapheme boxes; recognition,
@@ -134,6 +134,42 @@ or rotated scans. OCR images are limited to 8 million pixels and 8192 pixels per
 side, at up to 300 dpi, and removed from a private temporary directory after
 success, failure or cancellation. An in-flight MuPDF raster finishes off the UI
 thread before cancellation cleanup; the Tesseract process is killed and reaped.
+
+## Annotations and saving
+
+Select page text, then choose **Highlight**, **Underline** or **Strike-through**.
+Open **Annotations**, choose **Note** and click the page, or choose **Ink** and
+drag to draw a stroke. Each ink drag creates one annotation. **Escape** cancels
+the active tool. The panel lists supported annotations on the current page;
+select a row or an annotation on the page to view its comment, change its colour
+or comment, adjust ink width, or delete it. **Apply changes** commits panel edits.
+Geometry of existing annotations is preserved when editing their properties.
+Other annotation types remain in the PDF but are not editable in this panel.
+
+Annotation changes require the PDF's annotation permission, independently of
+copy permission. Text can be selected for markup when annotations are allowed
+but copying is denied; clipboard copying remains blocked. Locked and read-only
+annotations can be viewed but cannot be edited or deleted.
+
+Use **Undo**/**Redo**, **Ctrl+Z**/**Ctrl+Shift+Z** (**Cmd+Z**/**Cmd+Shift+Z**), or
+**Ctrl+Y** to undo and redo committed document edits. When editing a text field,
+these shortcuts affect that field instead. History retains up to 32 document
+versions and is bounded by 256 MB, except that it always retains the current and
+previous version. Edits serialize and reopen a full PDF snapshot, so large PDFs
+can pause briefly and consume additional memory.
+
+**Save** (**Ctrl+S** / **Cmd+S**) replaces the current PDF. **Save As…**
+(**Ctrl+Shift+S** / **Cmd+Shift+S**) chooses another file and makes it the current
+destination. The title shows `*` while document changes are unsaved. Closing the
+window or opening another PDF offers **Save**, **Save As**, **Discard** and
+**Cancel**; a cancelled or failed save leaves the current document open.
+Saving writes a temporary file beside the destination, reopens and authenticates
+it, checks its pages and permissions, then replaces the destination. Encryption
+and passwords are preserved. Background rendering, previews and printing use
+the current document, including unsaved annotations.
+
+This is annotation editing, not page-content editing, redaction or signature
+creation. Review does not execute PDF JavaScript or submit PDF data to services.
 
 ## Printing
 
@@ -445,6 +481,12 @@ cancellation, matching options, snippet navigation and copy-independent search
 using synthetic PDFs, including a long scan. Set `REVIEW_SCREENSHOTS` to capture
 the affected native states for inspection.
 
+`bash tests/wayland-annotations.sh` uses the same session and GTK chooser helper
+to create all five annotation types, edit and delete a note, undo and redo across
+a saved revision, cancel an unsaved close, and Save As. It reopens the resulting
+PDFs to check annotation values, oriented line quads and encrypted permissions.
+It also checks annotation permission independently of clipboard copy permission.
+
 For headless Wayland testing, start Sway with `tests/sway.conf`,
 `WLR_BACKENDS=headless`, `WLR_RENDERER=pixman`, and `WLR_LIBINPUT_NO_DEVICES=1`.
 Set `XDG_RUNTIME_DIR` to a private directory (mode 700). Point `WAYLAND_DISPLAY`
@@ -458,7 +500,7 @@ page pixels with ImageMagick (`magick` is required in addition to the Wayland
 tools above). It never activates external links; Rust tests inspect egui's URL
 and clipboard requests without dispatching them to external applications.
 
-This is a foundation, not a complete viewer. Annotations and tabs are not
+This is a foundation, not a complete viewer. Form filling and tabs are not
 implemented yet.
 
 ## CI and releases

@@ -14,13 +14,28 @@ pub struct Inspector {
 }
 
 impl Inspector {
+    /// Release embedded-stream objects before replacing their source document.
+    pub fn invalidate(&mut self) {
+        self.data = None;
+        self.save_requested = None;
+        self.message = None;
+    }
+
     pub fn ui(&mut self, ctx: &egui::Context, document: &mut PdfDocument) -> bool {
         if !self.open {
             return false;
         }
-        let data = self
-            .data
-            .get_or_insert_with(|| Inspection::read(document.pdf()));
+        let data = self.data.get_or_insert_with(|| {
+            let mut data = Inspection::read(document.pdf());
+            if let Ok(layers) = &mut data.layers {
+                for layer in layers {
+                    if let Some(enabled) = document.layer_visibility(layer.reference.xref()) {
+                        layer.enabled = enabled;
+                    }
+                }
+            }
+            data
+        });
         let mut changed = false;
         egui::Window::new("Document properties")
             .open(&mut self.open)

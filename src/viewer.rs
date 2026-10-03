@@ -1,6 +1,7 @@
 use egui::{Color32, Context, Key, Modifiers, TextureHandle, Vec2};
 
 use crate::{
+    annotations::{AnnotationUi, Kind},
     document::PdfDocument,
     inspector::Inspector,
     links::{self, LinkTarget, PageLink},
@@ -42,6 +43,14 @@ pub struct Viewer {
     pub inspector: Inspector,
     ocr: Ocr,
     text_revision: u64,
+    annotations: AnnotationUi,
+    pub save_requested: Option<bool>,
+}
+
+impl Drop for Viewer {
+    fn drop(&mut self) {
+        self.inspector.invalidate();
+    }
 }
 
 impl Viewer {
@@ -77,6 +86,8 @@ impl Viewer {
             inspector: Inspector::default(),
             ocr: Ocr::default(),
             text_revision,
+            annotations: AnnotationUi::default(),
+            save_requested: None,
         }
     }
 
@@ -90,8 +101,9 @@ impl Viewer {
             })
             .map_or_else(String::new, |label| format!(" [{label}]"));
         format!(
-            "Review — {} — {}/{}{} — {}",
+            "Review — {}{} — {}/{}{} — {}",
             self.document.name(),
+            if self.document.is_dirty() { " *" } else { "" },
             self.document.current_page() + 1,
             self.document.page_count(),
             label,
@@ -101,6 +113,67 @@ impl Viewer {
 
     pub fn path(&self) -> &std::path::Path {
         self.document.path()
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.document.is_dirty()
+    }
+
+    pub fn save(&mut self, save_as: bool) -> bool {
+        let path = if save_as {
+            let mut chooser = rfd::FileDialog::new()
+                .set_title("Save PDF As")
+                .add_filter("PDF documents", &["pdf"])
+                .set_file_name(self.document.name());
+            if let Some(parent) = self.path().parent() {
+                chooser = chooser.set_directory(parent);
+            }
+            let Some(path) = chooser.save_file() else {
+                return false;
+            };
+            path
+        } else {
+            self.path().to_path_buf()
+        };
+        match self.document.save(&path) {
+            Ok(()) => {
+                let key = crate::persistence::file_key(self.path());
+                if self.state_key != key {
+                    self.state_key = key;
+                    self.restore_position = true;
+                }
+                self.error = None;
+                true
+            }
+            Err(error) => {
+                self.error = Some(format!("Could not save PDF: {error:#}"));
+                false
+            }
+        }
+    }
+
+    fn invalidate_document(&mut self, ctx: &Context) {
+        self.render_worker = RenderWorker::new(self.document.worker_source());
+        self.page_texture = None;
+        self.rendered = None;
+        self.sidebar.clear_previews();
+        self.selection.clear();
+        self.search.reload_document(&self.document, ctx);
+        self.page_text.invalidate();
+        self.annotations.invalidate();
+        self.links.clear();
+        self.links_page = None;
+    }
+
+    fn edited(&mut self, result: anyhow::Result<()>, ctx: &Context) {
+        match result {
+            Ok(()) => {
+                self.ocr.cancel();
+                self.invalidate_document(ctx);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("Annotation change failed: {error:#}")),
+        }
     }
 
     pub fn print_if_requested(&mut self, window: &winit::window::Window) {
@@ -277,6 +350,36 @@ impl Viewer {
             && ctx.input_mut(|input| input.consume_key(Modifiers::ALT, Key::ArrowRight))
         {
             self.navigate_history(false);
+        }
+        if shortcuts
+            && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::S))
+        {
+            self.save_requested = Some(true);
+        } else if shortcuts && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) {
+            self.save_requested = Some(false);
+        }
+        if shortcuts && !ctx.egui_wants_keyboard_input() {
+            if ctx.input_mut(|i| {
+                i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
+                    || i.consume_key(Modifiers::COMMAND, Key::Y)
+            }) && self.document.can_redo()
+            {
+                self.inspector.invalidate();
+                let result = self.document.redo();
+                self.edited(result, &ctx);
+            } else if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z))
+                && self.document.can_undo()
+            {
+                self.inspector.invalidate();
+                let result = self.document.undo();
+                self.edited(result, &ctx);
+            }
+            if self.annotations.tool.is_some()
+                && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+            {
+                self.annotations.tool = None;
+                self.annotations.invalidate();
+            }
         }
         let mut focus_page =
             shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::G));
@@ -541,6 +644,25 @@ impl Viewer {
                 if ui.selectable_label(self.inspector.open, "Properties").on_hover_text("Ctrl+D / Cmd+D").clicked() {
                     self.inspector.open = !self.inspector.open;
                 }
+                if ui.button("Save").on_hover_text("Ctrl+S / Cmd+S").clicked() { self.save_requested = Some(false); }
+                if ui.button("Save As…").on_hover_text("Ctrl+Shift+S / Cmd+Shift+S").clicked() { self.save_requested = Some(true); }
+            });
+            ui.horizontal_wrapped(|ui| {
+                if ui.selectable_label(self.annotations.open, "Annotations").clicked() {
+                    self.annotations.open = !self.annotations.open;
+                    self.annotations.tool = None;
+                }
+                let quads = self.selection.quads(self.document.current_page());
+                for kind in [Kind::Highlight, Kind::Underline, Kind::StrikeOut] {
+                    if ui.add_enabled(self.document.permissions().annotate && !quads.is_empty(), egui::Button::new(kind.label())).on_disabled_hover_text("Select text first; this PDF must allow annotations").clicked() {
+                        self.inspector.invalidate();
+                        let result = self.annotations.add_markup(&mut self.document, kind, quads.clone());
+                        self.edited(result, &ctx);
+                    }
+                }
+                if ui.add_enabled(self.document.can_undo(), egui::Button::new("Undo")).clicked() { self.inspector.invalidate(); let result = self.document.undo(); self.edited(result, &ctx); }
+                if ui.add_enabled(self.document.can_redo(), egui::Button::new("Redo")).clicked() { self.inspector.invalidate(); let result = self.document.redo(); self.edited(result, &ctx); }
+                if self.document.is_dirty() { ui.label("Unsaved changes"); }
             });
             let permissions = self.document.permissions();
             if !permissions.print || !permissions.print_high_quality || !permissions.copy {
@@ -768,6 +890,15 @@ impl Viewer {
         }
         self.page_text.ui(root, &self.document);
 
+        match self
+            .annotations
+            .panel(root, &mut self.document, || self.inspector.invalidate())
+        {
+            Ok(true) => self.edited(Ok(()), &ctx),
+            Err(error) => self.edited(Err(error), &ctx),
+            _ => {}
+        }
+        let mut page_edited = false;
         egui::CentralPanel::default().show_inside(root, |ui| {
             let available = ui.available_size();
             self.viewport = [available.x, available.y];
@@ -914,15 +1045,28 @@ impl Viewer {
                             self.reveal_match = false;
                         }
                     }
-                    if let Err(error) = self.selection.ui(
-                        ui,
-                        &self.document,
-                        page,
-                        self.document.permissions().copy,
-                    ) {
+                    if self.annotations.tool.is_none()
+                        && let Err(error) = self.selection.ui(
+                            ui,
+                            &self.document,
+                            page,
+                            self.document.permissions().copy,
+                        )
+                    {
                         self.error = Some(format!("Failed to read page text: {error:#}"));
                     }
-                    activated = links::ui(ui, &self.links, page);
+                    if self.annotations.tool.is_none() {
+                        activated = links::ui(ui, &self.links, page);
+                    }
+                    match self
+                        .annotations
+                        .page_ui(ui, &mut self.document, page, || self.inspector.invalidate())
+                    {
+                        Ok(changed) => page_edited |= changed,
+                        Err(error) => {
+                            self.error = Some(format!("Annotation change failed: {error:#}"))
+                        }
+                    }
                 } else if pending {
                     ui.vertical_centered(|ui| {
                         ui.spinner();
@@ -951,6 +1095,11 @@ impl Viewer {
             self.selection.clear();
             self.page_text.invalidate();
             self.links_page = None;
+            self.annotations.invalidate();
+            ctx.request_repaint();
+        }
+        if page_edited {
+            self.edited(Ok(()), &ctx);
             ctx.request_repaint();
         }
         self.render_worker.end_frame(&ctx);
@@ -1012,6 +1161,123 @@ mod tests {
         let mut viewer = Viewer::new(crate::document::PdfDocument::open(path).unwrap());
         viewer.sidebar.open = false;
         (directory, viewer)
+    }
+
+    #[test]
+    fn edits_undo_and_redo_replace_the_submitted_search_snapshot() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            crate::document::tests::sample_pdf(
+                "BT /F1 16 Tf 40 350 Td (Original amber) Tj ET",
+                false,
+            ),
+        )
+        .unwrap();
+        let mut viewer = Viewer::new(crate::document::PdfDocument::open(file.path()).unwrap());
+        let ctx = egui::Context::default();
+        viewer.search.query = "amber".into();
+        viewer.search.options.case_sensitive = true;
+        viewer.search.start(&viewer.document, &ctx);
+        crate::search::tests::finish(&mut viewer.search);
+        assert_eq!(viewer.search.matches.len(), 1);
+        assert_eq!(viewer.search.matches[0].snippet, "Original amber");
+
+        // Page content differs between snapshots. Annotation-only edits would
+        // not expose a worker that still extracts text from the old snapshot.
+        let result = viewer.document.edit(|pdf| {
+            let buffer = mupdf::Buffer::from_bytes(
+                b"BT /F1 16 Tf 40 350 Td (Changed amber twice amber) Tj ET",
+            )?;
+            let stream = pdf.add_stream(&buffer, None, false)?;
+            pdf.find_page(0)?.dict_put("Contents", stream)?;
+            Ok(())
+        });
+        viewer.edited(result, &ctx);
+        for (undo, expected) in [
+            (None, "Changed amber twice amber"),
+            (Some(true), "Original amber"),
+            (Some(false), "Changed amber twice amber"),
+        ] {
+            if let Some(undo) = undo {
+                let result = if undo {
+                    viewer.document.undo()
+                } else {
+                    viewer.document.redo()
+                };
+                viewer.edited(result, &ctx);
+            }
+            assert!(viewer.error.is_none(), "{:?}", viewer.error);
+            assert_eq!(viewer.search.submitted, "amber");
+            assert!(viewer.search.options.case_sensitive);
+            crate::search::tests::finish(&mut viewer.search);
+            assert_eq!(
+                viewer.search.matches.len(),
+                if undo == Some(true) { 1 } else { 2 }
+            );
+            assert!(
+                viewer
+                    .search
+                    .matches
+                    .iter()
+                    .all(|hit| hit.page == 0 && hit.snippet == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn document_undo_shortcuts_do_not_undo_annotations_while_a_field_has_focus() {
+        use crate::annotations::{Geometry, Kind};
+        let mut document = crate::document::tests::sample_document();
+        document
+            .add_annotation(
+                0,
+                Kind::Note,
+                Geometry::Note([0.31, 0.72]),
+                "keyboard note",
+                [0.9, 0.2, 0.1],
+                2.0,
+            )
+            .unwrap();
+        let mut viewer = Viewer::new(document);
+        let context = egui::Context::default();
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            modifiers,
+            pressed: true,
+            repeat: false,
+        };
+        frame(
+            &mut viewer,
+            &context,
+            vec![key(egui::Key::Z, egui::Modifiers::COMMAND)],
+        );
+        assert!(viewer.document.annotations(0).unwrap().is_empty());
+        assert!(!viewer.is_dirty());
+        frame(
+            &mut viewer,
+            &context,
+            vec![key(
+                egui::Key::Z,
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            )],
+        );
+        assert_eq!(viewer.document.annotations(0).unwrap().len(), 1);
+        assert!(viewer.is_dirty());
+        frame(
+            &mut viewer,
+            &context,
+            vec![key(egui::Key::G, egui::Modifiers::COMMAND)],
+        );
+        assert!(context.egui_wants_keyboard_input());
+        frame(
+            &mut viewer,
+            &context,
+            vec![key(egui::Key::Z, egui::Modifiers::COMMAND)],
+        );
+        assert_eq!(viewer.document.annotations(0).unwrap().len(), 1);
+        assert!(viewer.is_dirty());
     }
 
     fn settled_frame(viewer: &mut Viewer, ctx: &egui::Context) -> egui::FullOutput {
@@ -1156,6 +1422,9 @@ mod tests {
                 .iter()
                 .any(|command| matches!(command, egui::OutputCommand::OpenUrl(_)))
         );
+        // Allow the closed popup's cached hit region to expire before clicking
+        // the page again, as the native repaint after dismissal does.
+        frame(&mut viewer, &ctx, vec![]);
         frame(
             &mut viewer,
             &ctx,

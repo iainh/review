@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod annotations;
 mod document;
 mod inspection;
 mod inspector;
@@ -57,6 +58,18 @@ impl From<egui_winit::accesskit_winit::Event> for AppEvent {
     }
 }
 
+enum PendingAction {
+    Open(PathBuf, Option<persistence::ReadingState>),
+    Close,
+}
+
+#[derive(Clone, Copy)]
+enum UnsavedDecision {
+    Save(bool),
+    Discard,
+    Cancel,
+}
+
 struct App {
     viewer: Option<Viewer>,
     store: persistence::Store,
@@ -69,6 +82,8 @@ struct App {
     fatal_error: Option<anyhow::Error>,
     proxy: Option<EventLoopProxy<AppEvent>>,
     native_ui: native_ui::NativeUi,
+    pending: Option<PendingAction>,
+    save_failed: bool,
 }
 
 impl App {
@@ -92,27 +107,83 @@ impl App {
             fatal_error: None,
             proxy: None,
             native_ui,
+            pending: None,
+            save_failed: false,
         }
     }
 
     fn open(&mut self, path: PathBuf) {
+        self.open_with_reading(path, None);
+    }
+
+    fn open_with_reading(&mut self, path: PathBuf, reading: Option<persistence::ReadingState>) {
+        if self.viewer.as_ref().is_some_and(Viewer::is_dirty) {
+            self.pending = Some(PendingAction::Open(path, reading));
+            self.save_failed = false;
+            if let Some(renderer) = &self.renderer {
+                renderer.window().request_redraw();
+            }
+            return;
+        }
+        self.open_unchecked(path, reading);
+    }
+
+    fn open_unchecked(&mut self, path: PathBuf, reading: Option<persistence::ReadingState>) {
         self.password_prompt = None;
         self.open_error = None;
         match document::PdfDocument::open_with_password(&path, None) {
-            Ok(Some(document)) => self.finish_open(document, None),
+            Ok(Some(document)) => self.finish_open(document, reading.as_ref()),
             Ok(None) => {
                 self.password_prompt = Some(PasswordPrompt {
                     path,
                     input: Zeroizing::new(String::new()),
                     incorrect: false,
                     focus: true,
-                    reading: None,
+                    reading,
                 })
             }
             Err(error) => self.open_error = Some(format!("{error:#}")),
         }
         if let Some(renderer) = &self.renderer {
             renderer.window().request_redraw();
+        }
+    }
+
+    fn request_close(&mut self, event_loop: &ActiveEventLoop) {
+        if self.viewer.as_ref().is_some_and(Viewer::is_dirty) {
+            self.pending = Some(PendingAction::Close);
+            self.save_failed = false;
+            if let Some(renderer) = &self.renderer {
+                renderer.window().request_redraw();
+            }
+        } else {
+            event_loop.exit();
+        }
+    }
+
+    /// Return whether the caller should exit. A cancelled/failed save never
+    /// consumes the pending action or replaces the current document.
+    fn resolve_unsaved(&mut self, decision: UnsavedDecision) -> bool {
+        match decision {
+            UnsavedDecision::Cancel => {
+                self.pending = None;
+                return false;
+            }
+            UnsavedDecision::Save(save_as) => {
+                if !self.save_current(save_as) {
+                    self.save_failed = true;
+                    return false;
+                }
+            }
+            UnsavedDecision::Discard => {}
+        }
+        match self.pending.take() {
+            Some(PendingAction::Close) => true,
+            Some(PendingAction::Open(path, reading)) => {
+                self.open_unchecked(path, reading);
+                false
+            }
+            None => false,
         }
     }
 
@@ -155,23 +226,27 @@ impl App {
     }
 
     fn open_bookmark(&mut self, bookmark: persistence::Bookmark) {
-        if self
-            .viewer
-            .as_ref()
-            .is_none_or(|viewer| viewer.state_key() != bookmark.path)
-        {
-            self.open(bookmark.path.clone());
-        }
-        if let Some(prompt) = &mut self.password_prompt {
-            prompt.reading = Some(bookmark.reading);
-            return;
-        }
-        // Failed opens leave the previous viewer untouched, including its location.
         if let Some(viewer) = &mut self.viewer
             && viewer.state_key() == bookmark.path
         {
             viewer.restore_reading(&bookmark.reading);
+        } else {
+            self.open_with_reading(bookmark.path, Some(bookmark.reading));
         }
+    }
+
+    fn save_current(&mut self, save_as: bool) -> bool {
+        self.capture_state();
+        let Some(viewer) = &mut self.viewer else {
+            return false;
+        };
+        if !viewer.save(save_as) {
+            return false;
+        }
+        self.store
+            .state
+            .opened(viewer.state_key().to_path_buf(), viewer.reading_state());
+        true
     }
 
     fn capture_state(&mut self) {
@@ -303,7 +378,7 @@ impl ApplicationHandler<AppEvent> for App {
         renderer.on_event(&event);
         let mut force_save = matches!(event, WindowEvent::CloseRequested);
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.request_close(event_loop),
             WindowEvent::Resized(size) => renderer.resize(size),
             WindowEvent::DroppedFile(path) => self.open(path),
             WindowEvent::RedrawRequested => {
@@ -312,36 +387,50 @@ impl ApplicationHandler<AppEvent> for App {
                 let mut quit = false;
                 let mut submit_password = false;
                 let mut library_action = None;
+                let unsaved_active = self.pending.is_some();
+                let mut unsaved_decision = None;
                 let mut output = renderer.context.run_ui(input, |ui| {
-                    let library_enabled = self.password_prompt.is_none()
-                        && !self.native_ui.help_open
-                        && !self.viewer.as_ref().is_some_and(Viewer::modal_open)
-                        && !ui.input(|input| input.key_pressed(Key::F1));
-                    library_action = self.library.ui(
-                        ui,
-                        &mut self.store.state,
-                        self.viewer.as_ref(),
-                        library_enabled,
-                    );
-                    (open_requested, quit, submit_password) = app_ui(
-                        &mut self.viewer,
-                        &mut self.open_error,
-                        &mut self.password_prompt,
-                        ui,
-                        &mut self.native_ui,
-                    );
-                    if let Some(error) = &self.state_error {
-                        let mut dismiss = false;
-                        egui::Window::new("Reading state").collapsible(false).show(
-                            ui.ctx(),
-                            |ui| {
-                                ui.label(error);
-                                dismiss = ui.button("Close").clicked();
-                            },
+                    let ctx = ui.ctx().clone();
+                    if unsaved_active {
+                        unsaved_decision = unsaved_ui(&ctx, self.save_failed);
+                    }
+                    let events =
+                        unsaved_active.then(|| ctx.input_mut(|i| std::mem::take(&mut i.events)));
+                    ui.add_enabled_ui(!unsaved_active, |ui| {
+                        let library_enabled = !unsaved_active
+                            && self.password_prompt.is_none()
+                            && !self.native_ui.help_open
+                            && !self.viewer.as_ref().is_some_and(Viewer::modal_open)
+                            && !ui.input(|input| input.key_pressed(Key::F1));
+                        library_action = self.library.ui(
+                            ui,
+                            &mut self.store.state,
+                            self.viewer.as_ref(),
+                            library_enabled,
                         );
-                        if dismiss {
-                            self.state_error = None;
+                        (open_requested, quit, submit_password) = app_ui(
+                            &mut self.viewer,
+                            &mut self.open_error,
+                            &mut self.password_prompt,
+                            ui,
+                            &mut self.native_ui,
+                        );
+                        if let Some(error) = &self.state_error {
+                            let mut dismiss = false;
+                            egui::Window::new("Reading state").collapsible(false).show(
+                                ui.ctx(),
+                                |ui| {
+                                    ui.label(error);
+                                    dismiss = ui.button("Close").clicked();
+                                },
+                            );
+                            if dismiss {
+                                self.state_error = None;
+                            }
                         }
+                    });
+                    if let Some(events) = events {
+                        ctx.input_mut(|i| i.events = events);
                     }
                 });
                 let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
@@ -364,9 +453,23 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(viewer) = &mut self.viewer {
                     viewer.print_if_requested(renderer.window());
                 }
-                if quit {
+                if let Some(save_as) = self.viewer.as_mut().and_then(|v| v.save_requested.take()) {
+                    self.save_current(save_as);
+                    if let Some(renderer) = &self.renderer {
+                        renderer.window().request_redraw();
+                    }
+                }
+                if let Some(decision) = unsaved_decision {
+                    if self.resolve_unsaved(decision) {
+                        force_save = true;
+                        event_loop.exit();
+                    }
+                    if let Some(renderer) = &self.renderer {
+                        renderer.window().request_redraw();
+                    }
+                } else if quit && !unsaved_active {
                     force_save = true;
-                    event_loop.exit();
+                    self.request_close(event_loop);
                 } else if submit_password {
                     self.submit_password();
                 } else if open_requested {
@@ -377,7 +480,7 @@ impl ApplicationHandler<AppEvent> for App {
                     // across threads. Avoid that path while winit is blocked.
                     #[cfg(not(target_os = "linux"))]
                     {
-                        dialog = dialog.set_parent(renderer.window());
+                        dialog = dialog.set_parent(self.renderer.as_ref().unwrap().window());
                     }
                     if let Some(viewer) = &self.viewer
                         && let Some(directory) = viewer.path().parent()
@@ -394,11 +497,11 @@ impl ApplicationHandler<AppEvent> for App {
                         .set_title("Save attachment (will not open)")
                         .set_file_name(filename);
                     #[cfg(not(target_os = "linux"))]
-                    let dialog = dialog.set_parent(renderer.window());
+                    let dialog = dialog.set_parent(self.renderer.as_ref().unwrap().window());
                     if let Some(path) = dialog.save_file() {
                         viewer.save_attachment(index, &path);
                     }
-                    renderer.window().request_redraw();
+                    self.renderer.as_ref().unwrap().window().request_redraw();
                 }
                 match library_action {
                     Some(library::Action::Open(path)) => self.open(path),
@@ -463,6 +566,9 @@ fn app_ui(
     let mut submit_password = false;
     if let Some(prompt) = password_prompt {
         let cancel_key = ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
+        // Capture Enter before the text edit consumes it. Submission belongs
+        // to the password modal and must also survive a layout re-pass.
+        let enter_key = ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
         let mut cancel = cancel_key;
         egui::Modal::new(egui::Id::new("pdf_password_prompt")).show(&ctx, |ui| {
             ui.set_width(360.0);
@@ -508,8 +614,7 @@ fn app_ui(
             }
             ui.label("Passwords are kept only in memory while the PDF is open.");
             ui.horizontal(|ui| {
-                submit_password = ui.button("Open PDF").clicked()
-                    || (field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)));
+                submit_password = ui.button("Open PDF").clicked() || enter_key;
                 cancel |= ui.button("Cancel").clicked();
             });
         });
@@ -579,6 +684,40 @@ fn app_ui(
     )
 }
 
+fn unsaved_ui(ctx: &egui::Context, save_failed: bool) -> Option<UnsavedDecision> {
+    let mut decision = None;
+    egui::Modal::new(egui::Id::new("unsaved_changes")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.heading("Save changes before continuing?");
+        ui.label(
+            "This PDF has unsaved changes. Discarding cannot be undone after the document closes.",
+        );
+        if save_failed {
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                "The PDF was not saved. Cancel to review the error, or choose Save As.",
+            );
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Save").clicked() {
+                decision = Some(UnsavedDecision::Save(false));
+            }
+            if ui.button("Save As…").clicked() {
+                decision = Some(UnsavedDecision::Save(true));
+            }
+            if ui.button("Discard").clicked() {
+                decision = Some(UnsavedDecision::Discard);
+            }
+            if ui.button("Cancel").clicked()
+                || ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+            {
+                decision = Some(UnsavedDecision::Cancel);
+            }
+        });
+    });
+    decision
+}
+
 #[derive(Debug, PartialEq)]
 enum Startup {
     Help,
@@ -639,6 +778,135 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dirty_document_open_and_close_require_a_successful_save_or_discard() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.pdf");
+        let replacement = directory.path().join("replacement.pdf");
+        std::fs::write(&source, document::tests::sample_pdf("", false)).unwrap();
+        std::fs::write(&replacement, document::tests::sample_pdf("", false)).unwrap();
+        let mut document = document::PdfDocument::open(&source).unwrap();
+        document
+            .add_annotation(
+                0,
+                annotations::Kind::Note,
+                annotations::Geometry::Note([0.3, 0.7]),
+                "keep this",
+                [0.9, 0.2, 0.1],
+                2.0,
+            )
+            .unwrap();
+        let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
+        app.viewer = Some(Viewer::new(document));
+        app.open(replacement.clone());
+        assert!(matches!(app.pending, Some(PendingAction::Open(..))));
+        assert_eq!(app.viewer.as_ref().unwrap().path(), source);
+        assert!(!app.resolve_unsaved(UnsavedDecision::Cancel));
+        assert!(app.pending.is_none());
+        assert!(app.viewer.as_ref().unwrap().is_dirty());
+        app.open(replacement.clone());
+        let mut permissions = std::fs::metadata(&source).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&source, permissions.clone()).unwrap();
+        assert!(!app.resolve_unsaved(UnsavedDecision::Save(false)));
+        assert!(app.pending.is_some());
+        assert!(app.viewer.as_ref().unwrap().is_dirty());
+        assert_eq!(app.viewer.as_ref().unwrap().path(), source);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o600);
+        }
+        #[cfg(windows)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&source, permissions).unwrap();
+        assert!(!app.resolve_unsaved(UnsavedDecision::Save(false)));
+        assert_eq!(app.viewer.as_ref().unwrap().path(), replacement);
+        assert_eq!(
+            document::PdfDocument::open(&source)
+                .unwrap()
+                .annotations(0)
+                .unwrap()[0]
+                .contents,
+            "keep this"
+        );
+        app.pending = Some(PendingAction::Close);
+        assert!(!app.resolve_unsaved(UnsavedDecision::Cancel));
+        app.pending = Some(PendingAction::Close);
+        assert!(app.resolve_unsaved(UnsavedDecision::Discard));
+    }
+
+    #[test]
+    fn dirty_bookmark_replacement_preserves_destination_through_confirmation_and_password() {
+        for encrypted in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("source.pdf");
+            let target = directory.path().join("target.pdf");
+            std::fs::write(&source, document::tests::sample_pdf("", false)).unwrap();
+            if encrypted {
+                document::tests::encrypted_fixture(
+                    &target,
+                    "open-secret",
+                    mupdf::pdf::Permission::ANNOTATE,
+                    mupdf::pdf::Encryption::Aes256,
+                );
+            } else {
+                std::fs::write(&target, document::tests::sample_pdf("", false)).unwrap();
+            }
+            let mut document = document::PdfDocument::open(&source).unwrap();
+            document
+                .add_annotation(
+                    0,
+                    annotations::Kind::Note,
+                    annotations::Geometry::Note([0.25, 0.71]),
+                    "unsaved",
+                    [0.3, 0.7, 0.9],
+                    2.0,
+                )
+                .unwrap();
+            let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
+            app.viewer = Some(Viewer::new(document));
+            let reading = persistence::ReadingState {
+                page: 1,
+                scroll: [17.0, 93.0],
+                zoom: zoom::Zoom::Percent(2.0),
+            };
+            let bookmark = persistence::Bookmark {
+                path: target.clone(),
+                reading: reading.clone(),
+            };
+            app.open_bookmark(bookmark.clone());
+            assert!(matches!(app.pending, Some(PendingAction::Open(_, Some(_)))));
+            assert_eq!(app.viewer.as_ref().unwrap().path(), source);
+            app.resolve_unsaved(UnsavedDecision::Cancel);
+            assert!(app.viewer.as_ref().unwrap().is_dirty());
+            app.open_bookmark(bookmark);
+            assert!(!app.resolve_unsaved(UnsavedDecision::Discard));
+            if encrypted {
+                assert_eq!(
+                    app.password_prompt.as_ref().unwrap().reading.as_ref(),
+                    Some(&reading)
+                );
+                app.password_prompt
+                    .as_mut()
+                    .unwrap()
+                    .input
+                    .push_str("open-secret");
+                app.submit_password();
+            }
+            let viewer = app.viewer.as_ref().unwrap();
+            assert_eq!(viewer.path(), target);
+            assert_eq!(viewer.reading_state(), reading);
+            assert!(
+                document::PdfDocument::open(&source)
+                    .unwrap()
+                    .annotations(0)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
 
     fn key_event(key: Key, modifiers: Modifiers) -> egui::Event {
         egui::Event::Key {

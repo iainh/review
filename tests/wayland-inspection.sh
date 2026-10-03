@@ -114,7 +114,7 @@ echo 'PASS: explicit save produces exact bytes; cancel creates no file'
 # Expose the sidebar while leaving the main page's red rectangle visible below
 # the inspector. Pixel checks now catch stale thumbnails as well as stale pages.
 "$scratch/pointer" drag 340 33 910 33
-"$scratch/pointer" click 79 55
+"$scratch/pointer" click 79 100
 capture inspection-layers-on
 [[ $(red_pixels "$scratch/inspection-layers-on.png") -gt 0 ]]
 [[ $(red_pixels "$scratch/inspection-layers-on.png" 170x100+640+590) -gt 0 ]]

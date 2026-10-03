@@ -60,7 +60,7 @@ expect_title 'Review — outline.pdf — 1/2 — Fit page'
 key Right
 wtype -s 150 -M ctrl -k l -m ctrl -s 150 '600' -s 150 -k Return -s 150
 expect_title 'Review — outline.pdf — 2/2 — 600%'
-"$scratch/pointer" click 79 55
+"$scratch/pointer" click 79 77
 "$scratch/pointer" drag 240 450 327 450
 "$scratch/pointer" scroll 800 450 317
 bookmark

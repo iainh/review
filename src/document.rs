@@ -17,7 +17,7 @@ pub struct PageImage {
 }
 
 pub struct PdfDocument {
-    document: mupdf::pdf::PdfDocument,
+    pub(crate) document: mupdf::pdf::PdfDocument,
     // A fresh, unsaved copy for layer visibility. Inspection always uses source.
     layer_document: Option<mupdf::pdf::PdfDocument>,
     layer_settings: Vec<(i32, bool)>,
@@ -26,6 +26,15 @@ pub struct PdfDocument {
     current_page: usize,
     session_password: Option<Arc<Zeroizing<String>>>,
     recognized: Arc<Mutex<RecognizedText>>,
+    history: Vec<Snapshot>,
+    history_position: usize,
+    saved_revision: u64,
+    next_revision: u64,
+}
+
+struct Snapshot {
+    bytes: Arc<Vec<u8>>,
+    revision: u64,
 }
 
 #[derive(Default)]
@@ -39,6 +48,7 @@ pub struct PdfPermissions {
     pub print: bool,
     pub print_high_quality: bool,
     pub copy: bool,
+    pub annotate: bool,
 }
 
 /// Only owned Rust data crosses threads. Open this source on the worker so
@@ -49,12 +59,14 @@ pub struct WorkerSource {
     password: Option<Arc<Zeroizing<String>>>,
     layers: Vec<(i32, bool)>,
     recognized: Arc<Mutex<RecognizedText>>,
+    bytes: Arc<Vec<u8>>,
 }
 
 impl WorkerSource {
     pub fn open(&self) -> Result<PdfDocument> {
-        let mut document = PdfDocument::open_with_password(
+        let mut document = PdfDocument::from_bytes(
             &self.path,
+            self.bytes.clone(),
             self.password.as_deref().map(|p| p.as_str()),
         )?
         .context("PDF password changed; reopen the document")?;
@@ -78,12 +90,20 @@ impl PdfDocument {
         path: impl AsRef<Path>,
         password: Option<&str>,
     ) -> Result<Option<Self>> {
-        let path = path.as_ref().to_path_buf();
-        #[cfg(windows)]
-        let mupdf_path = path.to_str().context("PDF path is not valid UTF-8")?;
-        #[cfg(not(windows))]
-        let mupdf_path = path.as_path();
-        let mut document = Document::open(mupdf_path)
+        let path = path.as_ref();
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to open PDF at {}", path.display()))?;
+        Self::from_bytes(path, Arc::new(bytes), password)
+    }
+
+    fn from_bytes(
+        path: &Path,
+        bytes: Arc<Vec<u8>>,
+        password: Option<&str>,
+    ) -> Result<Option<Self>> {
+        // Neither the live document nor workers retain an original-file reader.
+        // This also permits replacement on Windows after all UI readers drop.
+        let mut document = Document::from_bytes(&bytes, "application/pdf")
             .with_context(|| format!("failed to open PDF at {}", path.display()))?;
         ensure!(
             document.is_pdf(),
@@ -105,8 +125,9 @@ impl PdfDocument {
         } else if needs_password {
             return Ok(None);
         }
-        let document = mupdf::pdf::PdfDocument::try_from(document)
+        let mut document = mupdf::pdf::PdfDocument::try_from(document)
             .context("failed to read PDF permissions")?;
+        document.disable_js()?;
         let page_count = usize::try_from(
             document
                 .page_count()
@@ -119,11 +140,15 @@ impl PdfDocument {
             document,
             layer_document: None,
             layer_settings: Vec::new(),
-            path,
+            path: path.to_path_buf(),
             page_count,
             current_page: 0,
             session_password: password.map(|p| Arc::new(Zeroizing::new(p.to_owned()))),
             recognized: Arc::default(),
+            history: vec![Snapshot { bytes, revision: 0 }],
+            history_position: 0,
+            saved_revision: 0,
+            next_revision: 1,
         }))
     }
 
@@ -135,6 +160,7 @@ impl PdfDocument {
             print_high_quality: permissions.contains(Permission::PRINT)
                 && permissions.contains(Permission::PRINT_HQ),
             copy: permissions.contains(Permission::COPY),
+            annotate: permissions.contains(Permission::ANNOTATE),
         }
     }
 
@@ -144,7 +170,146 @@ impl PdfDocument {
             password: self.session_password.clone(),
             layers: self.layer_settings.clone(),
             recognized: self.recognized.clone(),
+            bytes: self.history[self.history_position].bytes.clone(),
         }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.history[self.history_position].revision != self.saved_revision
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history_position > 0
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history_position + 1 < self.history.len()
+    }
+
+    pub fn undo(&mut self) -> Result<()> {
+        ensure!(self.can_undo(), "Nothing to undo");
+        self.restore(self.history_position - 1)
+    }
+
+    pub fn redo(&mut self) -> Result<()> {
+        ensure!(self.can_redo(), "Nothing to redo");
+        self.restore(self.history_position + 1)
+    }
+
+    fn restore(&mut self, position: usize) -> Result<()> {
+        let mut restored = Self::from_bytes(
+            &self.path,
+            self.history[position].bytes.clone(),
+            self.session_password.as_deref().map(|p| p.as_str()),
+        )?
+        .context("Undo PDF could not be authenticated")?;
+        if !self.layer_settings.is_empty() {
+            restored.apply_layer_visibility(&self.layer_settings)?;
+        }
+        self.layer_document = restored.layer_document;
+        self.document = restored.document;
+        self.history_position = position;
+        self.invalidate_text();
+        Ok(())
+    }
+
+    /// Apply an atomic edit on a separate, authenticated, thread-local document.
+    /// Snapshot failure leaves the live source and its undo history untouched.
+    pub(crate) fn edit(
+        &mut self,
+        change: impl FnOnce(&mut mupdf::pdf::PdfDocument) -> Result<()>,
+    ) -> Result<()> {
+        // Do not use the render worker's open path: inspection layer settings
+        // are view-only and must never become part of an edited/saved source.
+        let mut candidate = Self::from_bytes(
+            &self.path,
+            self.history[self.history_position].bytes.clone(),
+            self.session_password.as_deref().map(|p| p.as_str()),
+        )?
+        .context("Edit PDF could not be authenticated")?;
+        change(&mut candidate.document)?;
+        let mut options = mupdf::pdf::PdfWriteOptions::default();
+        options.set_encryption(mupdf::pdf::Encryption::Keep);
+        let mut bytes = Vec::new();
+        candidate
+            .document
+            .write_to_with_options(&mut bytes, options)?;
+        let bytes = Arc::new(bytes);
+        let mut reopened = Self::from_bytes(
+            &self.path,
+            bytes.clone(),
+            self.session_password.as_deref().map(|p| p.as_str()),
+        )?
+        .context("Edited PDF could not be authenticated")?;
+        ensure!(
+            reopened.page_count == self.page_count && reopened.permissions() == self.permissions(),
+            "Edited PDF changed document permissions or page count"
+        );
+        if !self.layer_settings.is_empty() {
+            reopened.apply_layer_visibility(&self.layer_settings)?;
+        }
+        self.layer_document = reopened.layer_document;
+        self.document = reopened.document;
+        self.history.truncate(self.history_position + 1);
+        self.history.push(Snapshot {
+            bytes,
+            revision: self.next_revision,
+        });
+        self.next_revision += 1;
+        // Bound history by count and bytes, retaining at least the current and
+        // previous versions. No temporary decrypted files are used for undo.
+        while self.history.len() > 32
+            || (self.history.len() > 2
+                && self.history.iter().map(|s| s.bytes.len()).sum::<usize>() > 256 * 1024 * 1024)
+        {
+            self.history.remove(0);
+        }
+        self.history_position = self.history.len() - 1;
+        self.invalidate_text();
+        Ok(())
+    }
+
+    pub fn save(&mut self, destination: &Path) -> Result<()> {
+        use std::io::Write;
+        let source = self.worker_source();
+        let parent = destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)
+            .context("Could not create a temporary PDF beside the destination")?;
+        temporary.write_all(&source.bytes)?;
+        temporary.as_file().sync_all()?;
+        // Reopen the actual file, authenticate it and load every page before
+        // replacing anything. Keep encryption/passwords and all unknown objects.
+        let reopened = Self::open_with_password(
+            temporary.path(),
+            self.session_password.as_deref().map(|p| p.as_str()),
+        )?
+        .context("Saved PDF could not be authenticated")?;
+        ensure!(
+            reopened.page_count == self.page_count && reopened.permissions() == self.permissions(),
+            "Saved PDF verification failed"
+        );
+        for page in 0..self.page_count {
+            reopened.document.load_page(page as i32)?.bounds()?;
+        }
+        drop(reopened);
+        if let Ok(metadata) = std::fs::metadata(destination) {
+            ensure!(
+                !metadata.permissions().readonly(),
+                "Destination is read-only"
+            );
+            temporary
+                .as_file()
+                .set_permissions(metadata.permissions())?;
+        }
+        temporary
+            .persist(destination)
+            .context("Could not replace the destination PDF")?;
+        self.path = destination.to_path_buf();
+        self.saved_revision = self.history[self.history_position].revision;
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
@@ -306,6 +471,12 @@ impl PdfDocument {
         self.apply_layer_visibility(&settings)?;
         self.invalidate_text();
         Ok(())
+    }
+
+    pub fn layer_visibility(&self, xref: i32) -> Option<bool> {
+        self.layer_settings
+            .iter()
+            .find_map(|&(id, enabled)| (id == xref).then_some(enabled))
     }
 
     fn apply_layer_visibility(&mut self, settings: &[(i32, bool)]) -> Result<()> {
@@ -543,7 +714,8 @@ pub(crate) mod tests {
                 super::PdfPermissions {
                     print: false,
                     print_high_quality: false,
-                    copy: false
+                    copy: false,
+                    annotate: false,
                 }
             );
             assert_eq!(document.page_count(), 2);
@@ -561,7 +733,8 @@ pub(crate) mod tests {
                 super::PdfPermissions {
                     print: true,
                     print_high_quality: true,
-                    copy: true
+                    copy: true,
+                    annotate: true,
                 }
             );
         }
@@ -583,7 +756,8 @@ pub(crate) mod tests {
             super::PdfPermissions {
                 print: true,
                 print_high_quality: false,
-                copy: false
+                copy: false,
+                annotate: false,
             }
         );
         assert!(document.session_password.is_none());
@@ -599,7 +773,8 @@ pub(crate) mod tests {
             super::PdfPermissions {
                 print: false,
                 print_high_quality: false,
-                copy: true
+                copy: true,
+                annotate: false,
             }
         );
         assert_eq!(
@@ -607,7 +782,8 @@ pub(crate) mod tests {
             super::PdfPermissions {
                 print: true,
                 print_high_quality: true,
-                copy: true
+                copy: true,
+                annotate: true,
             }
         );
     }
@@ -679,19 +855,13 @@ pub(crate) mod tests {
     }
 
     fn sample_with_text(text: &str) -> PdfDocument {
-        PdfDocument {
-            document: mupdf::pdf::PdfDocument::try_from(
-                mupdf::Document::from_bytes(&sample_pdf(text, false), "application/pdf").unwrap(),
-            )
-            .unwrap(),
-            layer_document: None,
-            layer_settings: Vec::new(),
-            path: "sample.pdf".into(),
-            page_count: 2,
-            current_page: 0,
-            session_password: None,
-            recognized: Arc::default(),
-        }
+        PdfDocument::from_bytes(
+            std::path::Path::new("sample.pdf"),
+            Arc::new(sample_pdf(text, false)),
+            None,
+        )
+        .unwrap()
+        .unwrap()
     }
 
     pub(crate) fn sample_pdf(text: &str, outline: bool) -> Vec<u8> {

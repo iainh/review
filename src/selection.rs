@@ -20,6 +20,63 @@ impl Selection {
         *self = Self::default();
     }
 
+    pub fn quads(&self, page: usize) -> Vec<crate::structured_text::Quad> {
+        if self.page != Some(page) {
+            return Vec::new();
+        }
+        self.text
+            .lines
+            .iter()
+            .filter_map(|line| {
+                let start = line.chars.start.max(self.range.start);
+                let end = line.chars.end.min(self.range.end);
+                if start >= end {
+                    return None;
+                }
+                let glyphs: Vec<_> = self.text.chars[start..end]
+                    .iter()
+                    .filter_map(|ch| ch.quad)
+                    .collect();
+                let first = glyphs.iter().find(|q| {
+                    let a = [q[1][0] - q[0][0], q[1][1] - q[0][1]];
+                    let b = [q[3][0] - q[0][0], q[3][1] - q[0][1]];
+                    (a[0] * b[1] - a[1] * b[0]).abs() > 1e-12
+                })?;
+                let origin = first[0];
+                let a = [first[1][0] - origin[0], first[1][1] - origin[1]];
+                let b = [first[3][0] - origin[0], first[3][1] - origin[1]];
+                let determinant = a[0] * b[1] - a[1] * b[0];
+                let mut min = [f32::INFINITY; 2];
+                let mut max = [f32::NEG_INFINITY; 2];
+                // Bound in the line's glyph basis, not an axis-aligned page box:
+                // this preserves rotated/skewed text and reversed glyph order.
+                for p in glyphs.iter().flatten() {
+                    let p = [p[0] - origin[0], p[1] - origin[1]];
+                    let local = [
+                        (p[0] * b[1] - p[1] * b[0]) / determinant,
+                        (a[0] * p[1] - a[1] * p[0]) / determinant,
+                    ];
+                    for axis in 0..2 {
+                        min[axis] = min[axis].min(local[axis]);
+                        max[axis] = max[axis].max(local[axis]);
+                    }
+                }
+                let point = |u: f32, v: f32| {
+                    [
+                        origin[0] + u * a[0] + v * b[0],
+                        origin[1] + u * a[1] + v * b[1],
+                    ]
+                };
+                Some([
+                    point(min[0], min[1]),
+                    point(max[0], min[1]),
+                    point(max[0], max[1]),
+                    point(min[0], max[1]),
+                ])
+            })
+            .collect()
+    }
+
     pub fn escape(&mut self, ctx: &egui::Context) {
         if !self.range.is_empty()
             && !ctx.egui_wants_keyboard_input()
@@ -39,7 +96,8 @@ impl Selection {
         if self.page != Some(document.current_page()) || self.revision != document.text_revision() {
             self.clear();
         }
-        if !copy_allowed {
+        let selection_allowed = copy_allowed || document.permissions().annotate;
+        if !selection_allowed {
             self.clear();
         } else if self.page.is_none() {
             self.page = Some(document.current_page());
@@ -67,7 +125,7 @@ impl Selection {
                 (position.y - page.min.y) / page.height(),
             ]
         };
-        if copy_allowed {
+        if selection_allowed {
             if response.hovered() && !self.text.chars.is_empty() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
             }
@@ -126,7 +184,7 @@ impl Selection {
                         .retain(|event| !matches!(event, egui::Event::Copy));
                     key || event
                 });
-                if copy {
+                if copy && copy_allowed {
                     self.copy(ui.ctx());
                 }
             }
@@ -147,7 +205,7 @@ impl Selection {
             }
             if ui
                 .add_enabled(
-                    copy_allowed && !self.text.chars.is_empty(),
+                    selection_allowed && !self.text.chars.is_empty(),
                     egui::Button::new("Select all on page"),
                 )
                 .clicked()
@@ -185,6 +243,56 @@ impl Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markup_joins_glyphs_per_line_without_losing_rotation_or_reversed_order() {
+        use crate::structured_text::{TextChar, TextLine};
+        let mut selection = Selection {
+            page: Some(0),
+            range: 0..3,
+            ..Default::default()
+        };
+        let quads = [
+            [[0.3, 0.6], [0.3, 0.55], [0.25, 0.55], [0.25, 0.6]],
+            [[0.3, 0.7], [0.3, 0.65], [0.25, 0.65], [0.25, 0.7]],
+            [[0.3, 0.5], [0.3, 0.45], [0.25, 0.45], [0.25, 0.5]],
+        ];
+        selection.text.chars = quads
+            .into_iter()
+            .map(|quad| TextChar {
+                ch: 'a',
+                quad: Some(quad),
+                bidi: 0,
+            })
+            .collect();
+        selection.text.lines = vec![TextLine {
+            chars: 0..3,
+            direction: [0.0, -1.0],
+        }];
+        let joined = selection.quads(0);
+        assert_eq!(joined.len(), 1);
+        for (actual, expected) in
+            joined[0]
+                .into_iter()
+                .zip([[0.3, 0.7], [0.3, 0.45], [0.25, 0.45], [0.25, 0.7]])
+        {
+            for axis in 0..2 {
+                assert!((actual[axis] - expected[axis]).abs() < 1e-6);
+            }
+        }
+        assert!(selection.quads(1).is_empty());
+        selection.text.lines = vec![
+            TextLine {
+                chars: 0..1,
+                direction: [0.0, -1.0],
+            },
+            TextLine {
+                chars: 1..3,
+                direction: [0.0, -1.0],
+            },
+        ];
+        assert_eq!(selection.quads(0).len(), 2);
+    }
 
     fn frame(
         selection: &mut Selection,
@@ -405,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_denial_clears_cache_and_selection_and_navigation_clears_selection() {
+    fn copy_denial_allows_annotation_selection_and_navigation_clears_selection() {
         let ctx = egui::Context::default();
         let mut document = crate::document::tests::sample_document();
         let mut selection = Selection::default();
@@ -427,9 +535,9 @@ mod tests {
             false,
         );
         assert!(clipboard(denied).is_none());
-        assert!(selection.range.is_empty());
-        assert!(selection.text.chars.is_empty());
-        assert!(selection.page.is_none());
+        assert!(!selection.range.is_empty());
+        assert!(!selection.quads(0).is_empty());
+        assert_eq!(selection.page, Some(0));
         frame(
             &mut selection,
             &ctx,
@@ -530,6 +638,9 @@ mod tests {
             ))
             .is_none()
         );
-        assert!(selection.text.chars.is_empty());
+        // Copy denial still permits markup selection when annotations are allowed.
+        assert!(document.permissions().annotate);
+        assert_eq!(selection.text.plain_text(), "violet river");
+        assert!(!selection.quads(0).is_empty());
     }
 }

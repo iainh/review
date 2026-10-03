@@ -39,6 +39,8 @@ open_pdf() {
 }
 key() { wtype -s 150 -k "$1" -s 150; }
 query() { wtype -s 150 -M ctrl -k f -m ctrl -s 150 "$1" -s 150 -k Return -s 150; }
+# Search content follows the additional annotation toolbar row.
+click_search() { "$scratch/pointer" click "$1" "$(($2 + 22))"; }
 capture() {
     if [[ -n ${REVIEW_SCREENSHOTS:-} ]]; then
         mkdir -p "$REVIEW_SCREENSHOTS"
@@ -67,14 +69,14 @@ key Return; expect_page 2 2
 echo 'PASS: Enter, Shift+Enter, F3, Shift+F3 and bidirectional wraparound'
 
 # Click the first snippet to navigate directly from page two.
-"$scratch/pointer" click 145 80
+click_search 145 80
 expect_page 1 2
 # Case-sensitive alpha excludes Alpha; whole words also exclude alphabet.
-"$scratch/pointer" click 276 57
+click_search 276 57
 sleep .3
 key F3; expect_page 1 2
 key F3; expect_page 2 2
-"$scratch/pointer" click 382 57
+click_search 382 57
 sleep .3
 key F3; expect_page 1 2
 key F3; expect_page 2 2
@@ -86,7 +88,7 @@ key F3; expect_page 1 2
 echo 'PASS: snippet navigation and automatic case/whole-word rescanning'
 
 # Restore case-insensitive matching, keeping whole-word mode for the phrase.
-"$scratch/pointer" click 276 57
+click_search 276 57
 query 'needle phrase'
 sleep .3
 expect_page 1 2

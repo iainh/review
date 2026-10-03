@@ -100,11 +100,11 @@ capture named
 same_page_pixels xyz named
 back
 expect 1 'Fit page'
-"$scratch/pointer" click 100 86
+"$scratch/pointer" click 100 108
 expect 2 '225%'
 capture outline-xyz
 same_page_pixels xyz outline-xyz
-"$scratch/pointer" click 100 108
+"$scratch/pointer" click 100 130
 expect 2 'Fit width'
 capture outline-fit-width
 back
