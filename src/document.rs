@@ -51,13 +51,17 @@ impl PdfDocument {
         self.current_page
     }
 
-    pub fn change_page(&mut self, delta: i32) -> bool {
-        let next = self.current_page.saturating_add_signed(delta as isize);
-        if next >= self.page_count || next == self.current_page {
+    pub fn go_to_page(&mut self, page: usize) -> bool {
+        if page >= self.page_count || page == self.current_page {
             return false;
         }
-        self.current_page = next;
+        self.current_page = page;
         true
+    }
+
+    pub fn change_page(&mut self, delta: i32) -> bool {
+        let next = self.current_page.saturating_add_signed(delta as isize);
+        self.go_to_page(next)
     }
 
     pub fn render_current(&self, viewport: (u32, u32), zoom: f32) -> Result<PageImage> {
@@ -106,8 +110,58 @@ fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{fit_scale, rgb_to_rgba};
+pub(crate) mod tests {
+    use super::{PdfDocument, fit_scale, rgb_to_rgba};
+
+    pub fn sample_document() -> PdfDocument {
+        let text =
+            "BT /F1 16 Tf 40 350 Td (Alpha alpha) Tj 0 -24 Td (Needle) Tj 0 -24 Td (phrase) Tj ET";
+        let last = "BT /F1 16 Tf 30 120 Td (Last alpha) Tj ET";
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [10 20 310 420] /Resources << /Font << /F1 5 0 R >> >> /Contents 6 0 R >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>".to_string(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{text}\nendstream", text.len()),
+            format!("<< /Length {} >>\nstream\n{last}\nendstream", last.len()),
+        ];
+        let mut pdf = "%PDF-1.4\n".to_string();
+        let mut offsets = vec![0];
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+        }
+        let xref = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len()));
+        for offset in &offsets[1..] {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF",
+            offsets.len()
+        ));
+        PdfDocument {
+            document: mupdf::Document::from_bytes(pdf.as_bytes(), "application/pdf").unwrap(),
+            path: "sample.pdf".into(),
+            page_count: 2,
+            current_page: 0,
+        }
+    }
+
+    #[test]
+    fn navigation_rejects_out_of_range_pages_without_moving() {
+        let mut document = sample_document();
+        assert!(!document.change_page(-1));
+        assert!(document.go_to_page(1));
+        assert!(!document.go_to_page(1));
+        assert!(!document.go_to_page(2));
+        assert!(!document.go_to_page(usize::MAX));
+        assert!(!document.change_page(1));
+        assert_eq!(document.current_page(), 1);
+        assert!(document.change_page(-1));
+        assert_eq!(document.current_page(), 0);
+    }
 
     #[test]
     fn fit_scale_uses_the_constraining_dimension() {

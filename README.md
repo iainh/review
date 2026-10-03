@@ -14,15 +14,30 @@ cargo run --release -- document.pdf
 ```
 
 Use **Left**/**Page Up** and **Right**/**Page Down** to change pages, **+** and
-**-** to zoom, **0** to fit the page, and **Q** or **Escape** to quit.
+**-** to zoom, **0** to fit the page, and **Q** or **Escape** to quit when not
+editing a field. Zoomed pages can be scrolled horizontally and vertically.
+
+Use **Ctrl+G** (**Cmd+G** on macOS) to select the page field. Enter a page
+number and press **Enter** or click **Go**. Page numbers start at one; invalid
+numbers leave the current page unchanged. **Escape** cancels page editing.
 
 ## Design
 
 - MuPDF rasterizes only the current page at the display scale.
 - wgpu uploads that page once and composites it as a texture on the GPU.
 - The window redraws on demand rather than continuously.
-- The code uses winit directly; there is no web runtime or general-purpose UI
-  framework in the rendering path.
+- Native egui controls share the winit window and wgpu surface with the page;
+  there is no web runtime.
+
+## Testing
+
+Run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
+`bash tests/wayland.sh` exercises native keyboard and pointer input under Sway
+using the OpenID Connect handbook. It requires `swaymsg`, `wtype`, `grim`,
+`jq`, and `curl`, plus a running Sway session with `WAYLAND_DISPLAY`,
+`XDG_RUNTIME_DIR`, and `SWAYSOCK` set. Use a disposable session: the test
+opens and closes its own Review window. Set `REVIEW_TEST_PDF` to a local copy
+of the handbook and `REVIEW_SCREENSHOTS` to save screenshots for inspection.
 
 This is a foundation, not a complete viewer. Search, text selection, links,
 annotations, tabs, and persistent preferences are not implemented yet.
