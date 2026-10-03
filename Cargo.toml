@@ -1,0 +1,18 @@
+[package]
+name = "review"
+version = "0.1.0"
+edition = "2024"
+description = "A lightweight, hardware-accelerated PDF viewer"
+license = "AGPL-3.0-only"
+
+[dependencies]
+anyhow = "1.0"
+bytemuck = { version = "1.24", features = ["derive"] }
+mupdf = { version = "0.8", default-features = false, features = ["base14-fonts", "system-fonts"] }
+pollster = "0.4"
+wgpu = "29"
+winit = "0.30"
+
+[profile.release]
+lto = "thin"
+strip = true

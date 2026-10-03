@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v cargo >/dev/null 2>&1; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal
+fi
+
+export PATH="$HOME/.cargo/bin:$PATH"
+rustup component add rustfmt
+
+# mupdf-sys compiles MuPDF and generates bindings during the first build.
+if command -v apt-get >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y clang cmake libclang-dev libfontconfig1-dev \
+    libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev
+fi
+
+cargo fetch
