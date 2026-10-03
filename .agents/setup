@@ -7,13 +7,23 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 export PATH="$HOME/.cargo/bin:$PATH"
-rustup component add rustfmt
+rustup component add rustfmt clippy
 
 # mupdf-sys compiles MuPDF and generates bindings during the first build.
+# Sway, grim, and wtype support the headless Wayland UI tests.
 if command -v apt-get >/dev/null 2>&1; then
-  sudo apt-get update
-  sudo apt-get install -y clang cmake libclang-dev libfontconfig1-dev \
-    libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev
+  packages=(clang cmake libclang-dev libfontconfig1-dev libwayland-dev
+    libx11-dev libxkbcommon-dev libxkbcommon-x11-dev sway grim wtype jq pkg-config)
+  missing=()
+  for package in "${packages[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
+      missing+=("$package")
+    fi
+  done
+  if ((${#missing[@]})); then
+    sudo apt-get update
+    sudo apt-get install -y "${missing[@]}"
+  fi
 fi
 
 cargo fetch

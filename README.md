@@ -28,9 +28,16 @@ Search wraps at both ends. The current occurrence is orange and other matches
 on the page are yellow. **Escape** or **Close** closes search and clears highlights.
 Search uses the PDF's text layer; scanned images without text require OCR.
 
+The sidebar has **Outline** and **Pages** tabs. Click a bookmark or preview to
+navigate, and use the arrows to collapse or expand nested bookmarks. PDFs
+without bookmarks show “This document has no outline.” The current preview is
+highlighted and follows page changes. Drag the sidebar edge to resize it; use
+**F9** or **Sidebar** to hide or show it.
+
 ## Design
 
-- MuPDF rasterizes only the current page at the display scale.
+- MuPDF rasterizes the current page at the display scale and visible previews
+  at thumbnail resolution. Off-screen preview textures are released.
 - wgpu uploads that page once and composites it as a texture on the GPU.
 - The window redraws on demand rather than continuously.
 - Native egui controls share the winit window and wgpu surface with the page;
@@ -41,12 +48,20 @@ Search uses the PDF's text layer; scanned images without text require OCR.
 Run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
 `bash tests/wayland.sh` exercises native keyboard and pointer input under Sway
 using the OpenID Connect handbook. It requires `swaymsg`, `wtype`, `grim`,
-`jq`, and `curl`, plus a running Sway session with `WAYLAND_DISPLAY`,
+`jq`, `curl`, a C compiler, `pkg-config`, and Wayland development headers and
+`wayland-scanner`, plus a running Sway session with `WAYLAND_DISPLAY`,
 `XDG_RUNTIME_DIR`, and `SWAYSOCK` set. Use a disposable session: the test
 opens and closes its own Review window. Set `REVIEW_TEST_PDF` to a local copy
 of the handbook and `REVIEW_SCREENSHOTS` to save screenshots for inspection.
-With `REVIEW_TEST_PDF` set, run `cargo test -- --ignored` to check known
-handbook search results.
+With `REVIEW_TEST_PDF` set, run `cargo test handbook_ -- --ignored` to check
+known search results and bounded preview caching. The handbook has no embedded
+outline, so the Wayland test also generates a small nested-bookmark fixture.
+
+For headless Wayland testing, start Sway with `tests/sway.conf`,
+`WLR_BACKENDS=headless`, `WLR_RENDERER=pixman`, and `WLR_LIBINPUT_NO_DEVICES=1`.
+Set `XDG_RUNTIME_DIR` to a private directory (mode 700). Point `WAYLAND_DISPLAY`
+and `SWAYSOCK` at the sockets Sway creates in it. The test assumes a 1280×900
+output at scale one. No X server is used.
 
 This is a foundation, not a complete viewer. Text selection, links,
 annotations, tabs, and persistent preferences are not implemented yet.

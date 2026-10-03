@@ -1,6 +1,6 @@
 use egui::{Color32, Context, Key, Modifiers, TextureHandle, Vec2};
 
-use crate::{document::PdfDocument, search::Search};
+use crate::{document::PdfDocument, search::Search, sidebar::Sidebar};
 
 pub struct Viewer {
     document: PdfDocument,
@@ -11,11 +11,13 @@ pub struct Viewer {
     rendered: Option<(usize, (u32, u32), f32)>,
     search: Search,
     reveal_match: bool,
+    sidebar: Sidebar,
     pub quit: bool,
 }
 
 impl Viewer {
     pub fn new(document: PdfDocument) -> Self {
+        let sidebar = Sidebar::new(&document);
         Self {
             document,
             zoom: 1.0,
@@ -25,6 +27,7 @@ impl Viewer {
             rendered: None,
             search: Search::default(),
             reveal_match: false,
+            sidebar,
             quit: false,
         }
     }
@@ -72,6 +75,9 @@ impl Viewer {
     pub fn ui(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
         let focus_page = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::G));
+        if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F9)) {
+            self.sidebar.open = !self.sidebar.open;
+        }
         let mut focus_search = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::F));
         if focus_search {
             self.search.open = true;
@@ -102,29 +108,17 @@ impl Viewer {
         if self.search.next_page.is_some() {
             ctx.request_repaint();
         }
-        if !ctx.egui_wants_keyboard_input() {
-            ctx.input(|input| {
-                if input.key_pressed(Key::ArrowLeft) || input.key_pressed(Key::PageUp) {
-                    self.change_page(-1);
-                }
-                if input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::PageDown) {
-                    self.change_page(1);
-                }
-                if input.key_pressed(Key::Plus) || input.key_pressed(Key::Equals) {
-                    self.zoom = (self.zoom * 1.25).min(4.0);
-                }
-                if input.key_pressed(Key::Minus) {
-                    self.zoom = (self.zoom * 0.8).max(0.25);
-                }
-                if input.key_pressed(Key::Num0) {
-                    self.zoom = 1.0;
-                }
-                self.quit = input.key_pressed(Key::Q) || input.key_pressed(Key::Escape);
-            });
-        }
 
         egui::Panel::top("toolbar").show_inside(root, |ui| {
             ui.horizontal_wrapped(|ui| {
+                if ui
+                    .selectable_label(self.sidebar.open, "Sidebar")
+                    .on_hover_text("F9")
+                    .clicked()
+                {
+                    self.sidebar.open = !self.sidebar.open;
+                }
+                ui.separator();
                 if ui
                     .add_enabled(
                         self.document.current_page() > 0,
@@ -160,7 +154,7 @@ impl Viewer {
                     self.submit_page();
                 }
                 if (field.has_focus() || field.lost_focus())
-                    && ui.input(|input| input.key_pressed(Key::Escape))
+                    && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
                 {
                     field.surrender_focus();
                     self.go_to_page(self.document.current_page());
@@ -256,13 +250,48 @@ impl Viewer {
             });
         }
 
+        // Let text fields consume Escape and settle focus before handling
+        // document shortcuts. egui clears focus at the start of an Escape frame.
+        if !ctx.egui_wants_keyboard_input() {
+            let previous = (self.document.current_page(), self.zoom);
+            ctx.input(|input| {
+                if input.key_pressed(Key::ArrowLeft) || input.key_pressed(Key::PageUp) {
+                    self.change_page(-1);
+                }
+                if input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::PageDown) {
+                    self.change_page(1);
+                }
+                if input.key_pressed(Key::Plus) || input.key_pressed(Key::Equals) {
+                    self.zoom = (self.zoom * 1.25).min(4.0);
+                }
+                if input.key_pressed(Key::Minus) {
+                    self.zoom = (self.zoom * 0.8).max(0.25);
+                }
+                if input.key_pressed(Key::Num0) {
+                    self.zoom = 1.0;
+                }
+                self.quit = input.key_pressed(Key::Q) || input.key_pressed(Key::Escape);
+            });
+            if previous != (self.document.current_page(), self.zoom) {
+                ctx.request_repaint();
+            }
+        }
+
+        if let Some(page) = self.sidebar.ui(root, &self.document) {
+            self.go_to_page(page);
+            ctx.request_repaint();
+        }
+
         egui::CentralPanel::default().show_inside(root, |ui| {
             let available = ui.available_size();
             let dpi = ctx.pixels_per_point();
             let viewport = ((available.x * dpi) as u32, (available.y * dpi) as u32);
             let key = (self.document.current_page(), viewport, self.zoom);
             if self.rendered != Some(key) {
-                match self.document.render_current(viewport, self.zoom) {
+                match self
+                    .document
+                    .render_page(self.document.current_page(), viewport, self.zoom)
+                {
                     Ok(image) => {
                         self.page_texture = Some(ctx.load_texture(
                             "PDF page",
@@ -361,6 +390,37 @@ fn select_text(ctx: &Context, response: &egui::Response, len: usize) {
 #[cfg(test)]
 mod tests {
     use super::{Viewer, parse_page};
+
+    #[test]
+    fn page_editing_consumes_q_and_escape_without_quitting() {
+        let mut viewer = Viewer::new(crate::document::tests::sample_document());
+        let ctx = egui::Context::default();
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            modifiers,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+        };
+        for (event, expected) in [
+            (key(egui::Key::G, egui::Modifiers::COMMAND), "1"),
+            (egui::Event::Text("q".into()), "q"),
+            (key(egui::Key::Escape, egui::Modifiers::NONE), "1"),
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                events: vec![event],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| viewer.ui(ui));
+            assert!(!viewer.quit);
+            assert_eq!(viewer.page_input, expected);
+            assert_eq!(viewer.document.current_page(), 0);
+        }
+    }
 
     #[test]
     fn shift_f3_uses_event_modifiers_after_shift_has_been_released() {

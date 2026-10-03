@@ -101,8 +101,18 @@ impl PdfDocument {
         Ok(matches)
     }
 
-    pub fn render_current(&self, viewport: (u32, u32), zoom: f32) -> Result<PageImage> {
-        let page = self.document.load_page(self.current_page as i32)?;
+    pub fn outlines(&self) -> Result<Vec<mupdf::Outline>> {
+        Ok(self.document.outlines()?)
+    }
+
+    pub fn render_page(
+        &self,
+        page_number: usize,
+        viewport: (u32, u32),
+        zoom: f32,
+    ) -> Result<PageImage> {
+        ensure!(page_number < self.page_count, "page is out of range");
+        let page = self.document.load_page(page_number as i32)?;
         let bounds = page.bounds()?;
         let page_width = bounds.x1 - bounds.x0;
         let page_height = bounds.y1 - bounds.y0;
@@ -157,9 +167,19 @@ pub(crate) mod tests {
     }
 
     fn sample_with_text(text: &str) -> PdfDocument {
+        PdfDocument {
+            document: mupdf::Document::from_bytes(&sample_pdf(text, false), "application/pdf")
+                .unwrap(),
+            path: "sample.pdf".into(),
+            page_count: 2,
+            current_page: 0,
+        }
+    }
+
+    fn sample_pdf(text: &str, outline: bool) -> Vec<u8> {
         let last = "BT /F1 16 Tf 30 120 Td (Last alpha) Tj ET";
-        let objects = [
-            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        let mut objects = vec![
+            format!("<< /Type /Catalog /Pages 2 0 R {} >>", if outline { "/Outlines 8 0 R" } else { "" }),
             "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_string(),
             "<< /Type /Page /Parent 2 0 R /MediaBox [10 20 310 420] /Resources << /Font << /F1 5 0 R >> >> /Contents 6 0 R >>".to_string(),
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>".to_string(),
@@ -167,6 +187,13 @@ pub(crate) mod tests {
             format!("<< /Length {} >>\nstream\n{text}\nendstream", text.len()),
             format!("<< /Length {} >>\nstream\n{last}\nendstream", last.len()),
         ];
+        if outline {
+            objects.extend([
+                "<< /Type /Outlines /First 9 0 R /Last 9 0 R /Count 2 >>".to_string(),
+                "<< /Title (Chapter one) /Parent 8 0 R /Dest [3 0 R /Fit] /First 10 0 R /Last 10 0 R /Count 1 >>".to_string(),
+                "<< /Title (Nested chapter two) /Parent 9 0 R /Dest [4 0 R /Fit] >>".to_string(),
+            ]);
+        }
         let mut pdf = "%PDF-1.4\n".to_string();
         let mut offsets = vec![0];
         for (index, object) in objects.iter().enumerate() {
@@ -182,12 +209,50 @@ pub(crate) mod tests {
             "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF",
             offsets.len()
         ));
-        PdfDocument {
-            document: mupdf::Document::from_bytes(pdf.as_bytes(), "application/pdf").unwrap(),
-            path: "sample.pdf".into(),
-            page_count: 2,
-            current_page: 0,
-        }
+        pdf.into_bytes()
+    }
+
+    #[test]
+    #[ignore = "exports a synthetic outline PDF to REVIEW_FIXTURE_DIR for Wayland tests"]
+    fn export_wayland_fixture() {
+        let directory = std::path::PathBuf::from(std::env::var("REVIEW_FIXTURE_DIR").unwrap());
+        std::fs::write(
+            directory.join("outline.pdf"),
+            sample_pdf("BT /F1 16 Tf 40 350 Td (Chapter one) Tj ET", true),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn outline_preserves_hierarchy_and_resolves_page_destinations() {
+        assert!(sample_document().outlines().unwrap().is_empty());
+        let bytes = sample_pdf("", true);
+        let document = mupdf::Document::from_bytes(&bytes, "application/pdf").unwrap();
+        let outline = document.outlines().unwrap();
+        assert_eq!(outline.len(), 1);
+        assert_eq!(outline[0].title, "Chapter one");
+        assert_eq!(outline[0].dest.unwrap().loc.page_number, 0);
+        assert_eq!(outline[0].down.len(), 1);
+        assert_eq!(outline[0].down[0].title, "Nested chapter two");
+        assert_eq!(outline[0].down[0].dest.unwrap().loc.page_number, 1);
+    }
+
+    #[test]
+    fn preview_renders_the_requested_page_without_changing_navigation() {
+        let document = sample_document();
+        let image = document.render_page(1, (244, 244), 1.0).unwrap();
+        assert_eq!((image.width, image.height), (180, 90));
+        assert_eq!(image.rgba.len(), 180 * 90 * 4);
+        assert!(
+            image
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[0] < 128)
+        );
+        assert_eq!(document.current_page(), 0);
+        assert!(document.render_page(2, (244, 244), 1.0).is_err());
     }
 
     #[test]
