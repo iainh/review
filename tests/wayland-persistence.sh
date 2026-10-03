@@ -160,7 +160,7 @@ close
 swaymsg 'for_window [app_id="^review$"] floating enable' >/dev/null
 launch outline.pdf
 expect_title 'Review — outline.pdf — 1/2 — Fit page'
-swaymsg '[app_id="^review$"] resize set 1037 px 713 px' >/dev/null
+swaymsg '[app_id="^review$"] floating enable, resize set 1037 px 713 px' >/dev/null
 expect_state '.window.size == [1037,713]'
 close
 launch outline.pdf

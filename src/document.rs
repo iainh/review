@@ -1,6 +1,7 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -30,6 +31,13 @@ pub struct PdfDocument {
     page_count: usize,
     current_page: usize,
     session_password: Option<Arc<Zeroizing<String>>>,
+    recognized: Arc<Mutex<RecognizedText>>,
+}
+
+#[derive(Default)]
+struct RecognizedText {
+    pages: HashMap<usize, crate::structured_text::PageText>,
+    revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +54,7 @@ pub struct WorkerSource {
     path: PathBuf,
     password: Option<Arc<Zeroizing<String>>>,
     layers: Vec<(i32, bool)>,
+    recognized: Arc<Mutex<RecognizedText>>,
 }
 
 impl WorkerSource {
@@ -58,6 +67,7 @@ impl WorkerSource {
         if !self.layers.is_empty() {
             document.apply_layer_visibility(&self.layers)?;
         }
+        document.recognized = self.recognized.clone();
         Ok(document)
     }
 }
@@ -119,6 +129,7 @@ impl PdfDocument {
             page_count,
             current_page: 0,
             session_password: password.map(|p| Arc::new(Zeroizing::new(p.to_owned()))),
+            recognized: Arc::default(),
         }))
     }
 
@@ -138,6 +149,7 @@ impl PdfDocument {
             path: self.path.clone(),
             password: self.session_password.clone(),
             layers: self.layer_settings.clone(),
+            recognized: self.recognized.clone(),
         }
     }
 
@@ -297,7 +309,9 @@ impl PdfDocument {
             .filter(|layer| layer.controllable)
             .map(|layer| (layer.reference.xref(), layer.enabled))
             .collect();
-        self.apply_layer_visibility(&settings)
+        self.apply_layer_visibility(&settings)?;
+        self.invalidate_text();
+        Ok(())
     }
 
     fn apply_layer_visibility(&mut self, settings: &[(i32, bool)]) -> Result<()> {
@@ -334,6 +348,51 @@ impl PdfDocument {
     /// Extraction itself is permission-neutral. Copy and accessibility consumers
     /// must independently enforce their respective document permissions.
     pub fn structured_text(&self, page_number: usize) -> Result<crate::structured_text::PageText> {
+        let native = self.native_text(page_number)?;
+        if !native.chars.is_empty() {
+            return Ok(native);
+        }
+        Ok(self
+            .recognized
+            .lock()
+            .unwrap()
+            .pages
+            .get(&page_number)
+            .cloned()
+            .unwrap_or(native))
+    }
+
+    /// Session text changes invalidate consumer caches, including accessibility
+    /// nodes, selection and any in-flight document search.
+    pub fn text_revision(&self) -> u64 {
+        self.recognized.lock().unwrap().revision
+    }
+
+    /// Call after a successful edit or undo/redo. Preserve the recognized Arc
+    /// when replacing the live source so old workers observe this revision too.
+    /// Layer visibility changes also call this after updating the active view.
+    pub fn invalidate_text(&self) {
+        let mut recognized = self.recognized.lock().unwrap();
+        recognized.pages.clear();
+        recognized.revision += 1;
+    }
+
+    pub fn set_recognized_text(
+        &self,
+        page_number: usize,
+        text: crate::structured_text::PageText,
+    ) -> Result<()> {
+        ensure!(
+            self.native_text(page_number)?.chars.is_empty(),
+            "This page already has native text; OCR will not replace it"
+        );
+        let mut recognized = self.recognized.lock().unwrap();
+        recognized.pages.insert(page_number, text);
+        recognized.revision += 1;
+        Ok(())
+    }
+
+    pub fn native_text(&self, page_number: usize) -> Result<crate::structured_text::PageText> {
         ensure!(page_number < self.page_count, "page is out of range");
         let page = self.rendering_document().load_page(page_number as i32)?;
         let bounds = page.bounds()?;
@@ -350,6 +409,23 @@ impl PdfDocument {
         ensure!(page_number < self.page_count, "page is out of range");
         if query.trim().is_empty() {
             return Ok(vec![]);
+        }
+        if self
+            .recognized
+            .lock()
+            .unwrap()
+            .pages
+            .contains_key(&page_number)
+        {
+            return Ok(self
+                .structured_text(page_number)?
+                .search(query)
+                .into_iter()
+                .map(|quads| SearchMatch {
+                    page: page_number,
+                    quads,
+                })
+                .collect());
         }
         let page_label = page_number + 1;
         let page = self
@@ -671,6 +747,7 @@ pub(crate) mod tests {
             page_count: 2,
             current_page: 0,
             session_password: None,
+            recognized: Arc::default(),
         }
     }
 

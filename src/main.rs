@@ -9,6 +9,7 @@ mod links;
 mod macos;
 mod native_ui;
 mod navigation;
+mod ocr;
 mod page_text;
 mod persistence;
 mod printing;
@@ -488,6 +489,16 @@ fn app_ui(
             if prompt.focus {
                 field.request_focus();
                 prompt.focus = false;
+            }
+            // egui chooses directional focus before TextEdit installs its
+            // arrow filter on the first focused pass. Keep arrows used to edit
+            // the password from moving focus at the end of that pass.
+            if field.has_focus()
+                && ui.input(|input| {
+                    input.key_pressed(Key::ArrowLeft) || input.key_pressed(Key::ArrowRight)
+                })
+            {
+                ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
             }
             if prompt.incorrect {
                 ui.colored_label(

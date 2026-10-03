@@ -9,6 +9,7 @@ use crate::{document::PdfDocument, structured_text::PageText};
 #[derive(Default)]
 pub struct Selection {
     page: Option<usize>,
+    revision: u64,
     text: PageText,
     anchor: usize,
     range: Range<usize>,
@@ -35,7 +36,7 @@ impl Selection {
         page: Rect,
         copy_allowed: bool,
     ) -> Result<()> {
-        if self.page != Some(document.current_page()) {
+        if self.page != Some(document.current_page()) || self.revision != document.text_revision() {
             self.clear();
         }
         if !copy_allowed {
@@ -43,6 +44,7 @@ impl Selection {
         } else if self.page.is_none() {
             self.page = Some(document.current_page());
             self.text = document.structured_text(document.current_page())?;
+            self.revision = document.text_revision();
         }
         let response = ui.interact(
             page,
@@ -466,5 +468,68 @@ mod tests {
             .as_deref(),
             Some("Last alpha")
         );
+    }
+
+    #[test]
+    fn recognition_replaces_an_empty_cache_and_invalidates_old_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("blank.pdf");
+        std::fs::write(&path, crate::document::tests::sample_pdf("", false)).unwrap();
+        let document = PdfDocument::open(&path).unwrap();
+        let ctx = egui::Context::default();
+        let mut selection = Selection::default();
+        frame(&mut selection, &ctx, &document, vec![], 0.0, true);
+        assert!(selection.text.chars.is_empty());
+        document
+            .set_recognized_text(0, crate::ocr::tests::word_text("amber fox"))
+            .unwrap();
+        frame(
+            &mut selection,
+            &ctx,
+            &document,
+            vec![command(Key::A)],
+            1.0,
+            true,
+        );
+        assert_eq!(
+            clipboard(frame(
+                &mut selection,
+                &ctx,
+                &document,
+                vec![command(Key::C)],
+                1.1,
+                true
+            ))
+            .as_deref(),
+            Some("amber fox")
+        );
+        document
+            .set_recognized_text(0, crate::ocr::tests::word_text("violet river"))
+            .unwrap();
+        assert!(
+            clipboard(frame(
+                &mut selection,
+                &ctx,
+                &document,
+                vec![command(Key::C)],
+                2.0,
+                true
+            ))
+            .is_none()
+        );
+        assert!(selection.range.is_empty());
+        assert_eq!(selection.text.plain_text(), "violet river");
+        assert!(
+            clipboard(frame(
+                &mut selection,
+                &ctx,
+                &document,
+                vec![command(Key::A), command(Key::C)],
+                3.0,
+                false
+            ))
+            .is_none()
+        );
+        assert!(selection.text.chars.is_empty());
     }
 }

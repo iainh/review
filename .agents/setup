@@ -11,10 +11,11 @@ rustup component add rustfmt clippy
 
 # mupdf-sys compiles MuPDF and generates bindings during the first build.
 # Sway, grim, wtype, and Zenity support the headless Wayland UI tests.
+# Tesseract and English data exercise the optional local OCR integration.
 if command -v apt-get >/dev/null 2>&1; then
   packages=(clang cmake libclang-dev libfontconfig1-dev libwayland-dev
     libx11-dev libxkbcommon-dev libxkbcommon-x11-dev sway grim wtype jq pkg-config
-    zenity desktop-file-utils python3-pyatspi wl-clipboard)
+    zenity desktop-file-utils python3-pyatspi wl-clipboard tesseract-ocr tesseract-ocr-eng)
   missing=()
   for package in "${packages[@]}"; do
     if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then

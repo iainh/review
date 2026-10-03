@@ -91,6 +91,37 @@ position and zoom at each jump, including later scrolling before going back.
 A new jump after going back clears the forward history. Opening another PDF
 starts a new history.
 
+## Local OCR for scanned pages
+
+Install [Tesseract](https://tesseract-ocr.github.io/tessdoc/Installation.html)
+and the recognition languages you need yourself. Make `tesseract` available on
+`PATH`. OCR is optional: Review works without it and shows installation guidance
+when the engine or its language data is missing. Review never uploads PDFs or
+downloads language data.
+
+Click **OCR**, choose one of the installed languages, then click **Recognize
+page N**. Recognition runs only for that page, after your explicit request,
+and only if it has no native text. Native text is never replaced. The panel
+reports rendering and recognition progress; **Cancel**, **Close OCR** or opening
+another PDF discards pending recognition without blocking navigation or zoom.
+
+Recognized Unicode text and page coordinates feed the same text model used by
+selection, assistive reading and search. A completed recognition clears stale
+selection and restarts an active search. **Ctrl+A**, **Ctrl+C** and the context
+menu use recognized text only when PDF copy permission allows it. There is no
+separate OCR export that bypasses that permission. The **Page text** pane remains
+available for assistive reading when copying is disabled.
+
+OCR text stays in this session. Review does not change or save the original PDF,
+create a sidecar or add a persistent text layer. Reopening the PDF loses OCR text.
+Changing visible PDF layers or editing the document clears session OCR text.
+Tesseract word boxes are subdivided into approximate grapheme boxes; recognition,
+reading order and highlights can be inaccurate, especially for complex layouts
+or rotated scans. OCR images are limited to 8 million pixels and 8192 pixels per
+side, at up to 300 dpi, and removed from a private temporary directory after
+success, failure or cancellation. An in-flight MuPDF raster finishes off the UI
+thread before cancellation cleanup; the Tesseract process is killed and reaped.
+
 ## Printing
 
 Use **Print…** or **Ctrl+P** (**Cmd+P** on macOS). Choose **Fit** to scale each
@@ -158,8 +189,10 @@ and shows that restriction without hiding text from assistive technology.
 MuPDF extraction order is not guaranteed reading order. Columns, bidirectional
 text, tables, headings, links, figures and PDF tags are not reconstructed as an
 accessible semantic document. Scans without a text layer show an explicit
-no-text message; Review does not perform OCR. The raster page itself has no
-screen-reader text navigation. Linux AT-SPI text, focus and action integration
+no-text message with guidance for optional local OCR. Recognizing the displayed
+page refreshes this pane without navigation, including its assistive text.
+The raster page itself has no screen-reader text navigation. Linux AT-SPI text,
+focus and action integration
 are tested; VoiceOver, Narrator and NVDA need native-platform manual validation.
 
 ## Document inspection
@@ -379,6 +412,17 @@ Run `bash tests/wayland-selection.sh` in the same session, with `wl-clipboard`
 installed, to check native selection and clipboard contents. It generates
 interleaved-column, rotated-text and copy-restricted PDF fixtures and checks
 that page, zoom and search fields retain their own editing shortcuts.
+
+With Tesseract and its `eng` language installed, run
+`cargo test actual_local_tesseract -- --ignored` to exercise real OCR on generated
+image-only PDFs, including password authentication, copy restrictions, per-page
+recognition, search, shared worker revisions and unchanged source bytes.
+`bash tests/wayland-ocr.sh` exercises OCR, cancellation, missing-engine guidance,
+native-text refusal, clipboard restrictions and refreshed search under native
+Wayland, including native AT-SPI read-only text before and after recognition.
+It needs `python3-pyatspi` and Sway's D-Bus session, as above. It uses synthetic
+PDFs and never downloads language data or submits print jobs. Set
+`REVIEW_SCREENSHOTS` to capture the affected states.
 
 For headless Wayland testing, start Sway with `tests/sway.conf`,
 `WLR_BACKENDS=headless`, `WLR_RENDERER=pixman`, and `WLR_LIBINPUT_NO_DEVICES=1`.

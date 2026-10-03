@@ -11,7 +11,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub type Quad = [[f32; 2]; 4];
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TextChar {
     pub ch: char,
     /// Normalized page coordinates in perimeter order; None for separators.
@@ -19,19 +19,19 @@ pub struct TextChar {
     pub bidi: u16,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TextLine {
     pub chars: Range<usize>,
     /// Baseline direction in PDF coordinates, including vertical/rotated text.
     pub direction: [f32; 2],
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct PageText {
     pub chars: Vec<TextChar>,
     pub lines: Vec<TextLine>,
     pub paragraphs: Vec<Range<usize>>,
-    size: [f32; 2],
+    pub(crate) size: [f32; 2],
 }
 
 pub struct Hit {
@@ -103,7 +103,7 @@ impl PageText {
         Ok(page)
     }
 
-    fn separator(&mut self) {
+    pub(crate) fn separator(&mut self) {
         self.chars.push(TextChar {
             ch: '\n',
             quad: None,
@@ -113,6 +113,44 @@ impl PageText {
 
     pub fn plain_text(&self) -> String {
         self.text(0..self.chars.len())
+    }
+
+    /// OCR fallback search. Match Unicode lowercase and whitespace across
+    /// lines while retaining the original glyph indices for highlights.
+    pub fn search(&self, query: &str) -> Vec<Vec<Quad>> {
+        let normalize = |text: &str| {
+            text.split_whitespace()
+                .map(str::to_lowercase)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let query = normalize(query);
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut text = String::new();
+        let mut indices = Vec::new();
+        for (index, ch) in self.chars.iter().enumerate() {
+            if ch.ch.is_whitespace() {
+                if !text.is_empty() && !text.ends_with(' ') {
+                    text.push(' ');
+                    indices.push(index);
+                }
+            } else {
+                for folded in ch.ch.to_lowercase() {
+                    text.push(folded);
+                    indices.extend(std::iter::repeat_n(index, folded.len_utf8()));
+                }
+            }
+        }
+        text.match_indices(&query)
+            .map(|(start, _)| {
+                let range = indices[start]..indices[start + query.len() - 1] + 1;
+                // Keep each glyph's quad; joining boxes can highlight adjacent
+                // columns or whitespace that is not part of the match.
+                self.chars[range].iter().filter_map(|ch| ch.quad).collect()
+            })
+            .collect()
     }
 
     pub fn text(&self, range: Range<usize>) -> String {

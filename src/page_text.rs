@@ -6,7 +6,7 @@ use crate::document::PdfDocument;
 #[derive(Default)]
 pub struct PageText {
     pub open: bool,
-    cached: Option<(usize, Result<String, String>)>,
+    cached: Option<(usize, u64, Result<String, String>)>,
     focus: bool,
 }
 
@@ -41,9 +41,16 @@ impl PageText {
             });
         }
         let page = document.current_page();
-        if self.cached.as_ref().map(|(page, _)| *page) != Some(page) {
+        let revision = document.text_revision();
+        if self
+            .cached
+            .as_ref()
+            .map(|(page, revision, _)| (*page, *revision))
+            != Some((page, revision))
+        {
             self.cached = Some((
                 page,
+                revision,
                 document
                     .page_text(page)
                     .map_err(|error| format!("Could not extract page text: {error:#}")),
@@ -63,10 +70,10 @@ impl PageText {
                     self.open = false;
                 }
                 ui.separator();
-                match &self.cached.as_ref().unwrap().1 {
+                match &self.cached.as_ref().unwrap().2 {
                     Ok(text) => {
                         if text.trim().is_empty() {
-                            ui.label("No extractable text on this page. Scanned pages need OCR, which Review does not provide.");
+                            ui.label("No text on this page yet. For a scan, open OCR, choose an installed language and recognize this page. Text stays in this session.");
                         }
                         egui::ScrollArea::both().show(ui, |ui| {
                             let mut read_only = text.as_str();
@@ -183,6 +190,91 @@ mod tests {
                     assert!(copied.is_empty());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn same_page_ocr_refreshes_readable_accesskit_text_without_bypassing_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scan.pdf");
+        std::fs::write(&path, crate::document::tests::sample_pdf("", false)).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let pdf = mupdf::pdf::PdfDocument::try_from(
+            mupdf::Document::from_bytes(&bytes, "application/pdf").unwrap(),
+        )
+        .unwrap();
+        let mut options = mupdf::pdf::PdfWriteOptions::default();
+        options
+            .set_encryption(Encryption::Aes256)
+            .set_user_password("")
+            .set_owner_password("owner-secret")
+            .set_permissions(Permission::empty());
+        let restricted = directory.path().join("restricted.pdf");
+        pdf.save_with_options(restricted.to_str().unwrap(), options)
+            .unwrap();
+        for path in [&path, &restricted] {
+            let document = PdfDocument::open(path).unwrap();
+            let ctx = Context::default();
+            ctx.enable_accesskit();
+            let mut pane = PageText::default();
+            pane.toggle(&ctx);
+            let mut frame = |events| {
+                ctx.run_ui(
+                    RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 720.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| pane.ui(ui, &document),
+                )
+            };
+            frame(vec![]);
+            for word in ["amber fox", "violet river"] {
+                document
+                    .set_recognized_text(0, crate::ocr::tests::word_text(word))
+                    .unwrap();
+                let output = frame(vec![]);
+                assert!(
+                    output
+                        .platform_output
+                        .accesskit_update
+                        .unwrap()
+                        .nodes
+                        .iter()
+                        .any(|(_, node)| node.value() == Some(word)),
+                    "same-page OCR must refresh assistive text"
+                );
+                frame(vec![Event::Key {
+                    key: Key::A,
+                    modifiers: Modifiers::COMMAND,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                }]);
+                for event in [Event::Copy, Event::Cut] {
+                    let output = frame(vec![event]);
+                    let copied: Vec<_> = output
+                        .platform_output
+                        .commands
+                        .iter()
+                        .filter_map(|command| match command {
+                            OutputCommand::CopyText(text) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    if document.permissions().copy {
+                        assert_eq!(copied, [word]);
+                    } else {
+                        assert!(copied.is_empty());
+                    }
+                }
+            }
+            document.invalidate_text();
+            frame(vec![]);
+            assert!(pane.cached.as_ref().unwrap().2.as_ref().unwrap().is_empty());
         }
     }
 }

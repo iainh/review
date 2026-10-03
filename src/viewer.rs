@@ -5,6 +5,7 @@ use crate::{
     inspector::Inspector,
     links::{self, LinkTarget, PageLink},
     navigation::{History, ViewState, destination_view},
+    ocr::Ocr,
     page_text::PageText,
     persistence::{ReadingState, SidebarState},
     printing::PrintDialog,
@@ -39,6 +40,8 @@ pub struct Viewer {
     links: Vec<PageLink>,
     links_page: Option<usize>,
     pub inspector: Inspector,
+    ocr: Ocr,
+    text_revision: u64,
 }
 
 impl Viewer {
@@ -46,6 +49,7 @@ impl Viewer {
         let sidebar = Sidebar::new(&document);
         let render_worker = RenderWorker::new(document.worker_source());
         let state_key = crate::persistence::file_key(document.path());
+        let text_revision = document.text_revision();
         Self {
             document,
             state_key,
@@ -70,6 +74,8 @@ impl Viewer {
             links: Vec::new(),
             links_page: None,
             inspector: Inspector::default(),
+            ocr: Ocr::default(),
+            text_revision,
         }
     }
 
@@ -239,6 +245,17 @@ impl Viewer {
 
     pub fn ui(&mut self, root: &mut egui::Ui, open_requested: &mut bool) {
         self.render_worker.begin_frame();
+        self.ocr.poll(&self.document);
+        if self.text_revision != self.document.text_revision() {
+            self.text_revision = self.document.text_revision();
+            self.selection.clear();
+            self.reveal_match = false;
+            if !self.search.submitted.is_empty() {
+                self.search.start(&self.document);
+            } else {
+                self.search.clear_results();
+            }
+        }
         let ctx = root.ctx().clone();
         let previous = (self.document.current_page(), self.zoom);
         if root.is_enabled() && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::P))
@@ -492,6 +509,12 @@ impl Viewer {
                     self.search.open = true;
                     focus_search = true;
                 }
+                if ui.selectable_label(self.ocr.open, "OCR").clicked() {
+                    if self.ocr.open {
+                        self.ocr.cancel();
+                    }
+                    self.ocr.open = !self.ocr.open;
+                }
                 ui.separator();
                 if ui.button("Open…").on_hover_text("Ctrl+O / Cmd+O").clicked() {
                     *open_requested = true;
@@ -551,6 +574,8 @@ impl Viewer {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
         });
+
+        self.ocr.ui(root, &self.document);
 
         if self.search.open {
             egui::Panel::top("search_bar").show_inside(root, |ui| {
@@ -1483,6 +1508,49 @@ mod tests {
         let _ = egui::Context::default().run_ui(input, |ui| viewer.ui(ui, &mut false));
         assert_eq!(viewer.search.selected, Some(2));
         assert_eq!(viewer.document.current_page(), 1);
+    }
+
+    #[test]
+    fn recognition_restarts_submitted_search_and_removes_stale_matches() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("blank.pdf");
+        std::fs::write(&path, crate::document::tests::sample_pdf("", false)).unwrap();
+        let mut viewer = Viewer::new(crate::document::PdfDocument::open(&path).unwrap());
+        viewer.search.query = "amber".into();
+        viewer.search.start(&viewer.document);
+        for _ in 0..2 {
+            viewer.search.step(&viewer.document).unwrap();
+        }
+        assert!(viewer.search.matches.is_empty());
+        let ctx = egui::Context::default();
+        let run = |viewer: &mut Viewer| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(960.0, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| viewer.ui(ui, &mut false),
+            )
+        };
+        viewer
+            .document
+            .set_recognized_text(0, crate::ocr::tests::word_text("amber fox"))
+            .unwrap();
+        run(&mut viewer);
+        run(&mut viewer);
+        assert_eq!(viewer.search.matches.len(), 1);
+        viewer
+            .document
+            .set_recognized_text(0, crate::ocr::tests::word_text("violet river"))
+            .unwrap();
+        run(&mut viewer);
+        assert!(viewer.search.matches.is_empty());
+        run(&mut viewer);
+        assert!(viewer.search.matches.is_empty());
+        assert_eq!(viewer.text_revision, 2);
     }
 
     #[test]
