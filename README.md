@@ -34,6 +34,27 @@ without bookmarks show “This document has no outline.” The current preview i
 highlighted and follows page changes. Drag the sidebar edge to resize it; use
 **F9** or **Sidebar** to hide or show it.
 
+## Downloads
+
+[GitHub releases](https://github.com/iainh/review/releases) provide a Linux
+x86-64 tarball, separate macOS disk images for Apple Silicon and Intel, and a
+Windows x86-64 zip. Each package contains the executable, this README and the
+licence. `SHA256SUMS` contains checksums for all packages.
+
+Extract the tarball or zip, or mount the disk image and copy its contents to a
+local directory. Start the viewer from a terminal with a PDF path:
+
+```sh
+./review /path/to/document.pdf
+```
+
+On Windows, use `.\review.exe C:\path\to\document.pdf`. The Linux build targets
+Ubuntu 22.04 or newer and requires Fontconfig, X11/Wayland libraries and a
+working graphics driver. The macOS and Windows builds are not developer-signed
+or notarized; your operating system may require approval before running them.
+The macOS disk image contains a command-line executable, not a Finder-launchable
+`.app` bundle.
+
 ## Design
 
 - MuPDF rasterizes the current page at the display scale and visible previews
@@ -65,6 +86,17 @@ output at scale one. No X server is used.
 
 This is a foundation, not a complete viewer. Text selection, links,
 annotations, tabs, and persistent preferences are not implemented yet.
+
+## CI and releases
+
+GitHub Actions checks formatting, runs Clippy and tests, builds optimized
+executables, and verifies the packages on all four native targets for pushes to
+`main` and pull requests. Packages are available as workflow artifacts.
+
+To publish a release, update the version in `Cargo.toml` and `Cargo.lock`, commit
+the change, and push a matching tag, such as `v0.1.0`. The release workflow runs
+the same checks and publishes all packages and checksums only after every
+platform succeeds. A tag that does not match the package version is rejected.
 
 ## Licence
 
