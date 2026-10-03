@@ -13,6 +13,8 @@ egui-winit = { version = "0.34.3", default-features = false, features = ["clipbo
 mupdf = { version = "0.8", default-features = false, features = ["base14-fonts", "system-fonts"] }
 pollster = "0.4"
 rfd = "0.16"
+roxmltree = "0.21"
+unicode-segmentation = "1.12"
 wgpu = "29"
 winit = "0.30"
 zeroize = "1"

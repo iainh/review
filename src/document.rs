@@ -233,6 +233,17 @@ impl PdfDocument {
         self.go_to_page(next)
     }
 
+    /// Extraction itself is permission-neutral. Copy and accessibility consumers
+    /// must independently enforce their respective document permissions.
+    pub fn structured_text(&self, page_number: usize) -> Result<crate::structured_text::PageText> {
+        ensure!(page_number < self.page_count, "page is out of range");
+        let page = self.document.load_page(page_number as i32)?;
+        let bounds = page.bounds()?;
+        let text = page.to_text_page(TextPageFlags::SEGMENT | TextPageFlags::PARAGRAPH_BREAK)?;
+        crate::structured_text::PageText::from_xml(&text.to_xml(page_number as i32)?, bounds)
+            .with_context(|| format!("failed to extract text from page {}", page_number + 1))
+    }
+
     pub fn search_page(&self, page_number: usize, query: &str) -> Result<Vec<SearchMatch>> {
         ensure!(page_number < self.page_count, "page is out of range");
         if query.trim().is_empty() {

@@ -7,7 +7,9 @@ mod printing;
 mod render_worker;
 mod renderer;
 mod search;
+mod selection;
 mod sidebar;
+mod structured_text;
 mod viewer;
 mod zoom;
 

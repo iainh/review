@@ -5,6 +5,7 @@ use crate::{
     printing::PrintDialog,
     render_worker::{Priority, RenderKey, RenderWorker},
     search::Search,
+    selection::Selection,
     sidebar::Sidebar,
     zoom::{POINT_SCALE, Zoom},
 };
@@ -23,6 +24,7 @@ pub struct Viewer {
     reveal_match: bool,
     sidebar: Sidebar,
     printing: PrintDialog,
+    selection: Selection,
     pub quit: bool,
 }
 
@@ -44,6 +46,7 @@ impl Viewer {
             reveal_match: false,
             sidebar,
             printing: PrintDialog::default(),
+            selection: Selection::default(),
             quit: false,
         }
     }
@@ -373,6 +376,7 @@ impl Viewer {
 
         // Let text fields consume Escape and settle focus before handling
         // document shortcuts. egui clears focus at the start of an Escape frame.
+        self.selection.escape(&ctx);
         if !self.printing.open && !ctx.egui_wants_keyboard_input() {
             let previous = (self.document.current_page(), self.zoom);
             ctx.input(|input| {
@@ -535,6 +539,14 @@ impl Viewer {
                                 self.reveal_match = false;
                             }
                         }
+                        if let Err(error) = self.selection.ui(
+                            ui,
+                            &self.document,
+                            page,
+                            self.document.permissions().copy,
+                        ) {
+                            self.error = Some(format!("Failed to read page text: {error:#}"));
+                        }
                     } else if pending {
                         ui.vertical_centered(|ui| {
                             ui.spinner();
@@ -578,6 +590,134 @@ fn select_text(ctx: &Context, response: &egui::Response, len: usize) {
 #[cfg(test)]
 mod tests {
     use super::{Viewer, parse_page};
+
+    #[test]
+    fn viewer_enforces_copy_permission_without_blocking_reusable_extraction() {
+        use crate::document::{PdfDocument, tests::encrypted_fixture};
+        use mupdf::pdf::{Encryption, Permission};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("restricted.pdf");
+        encrypted_fixture(&path, "", Permission::ACCESSIBILITY, Encryption::Aes256);
+        for (password, allowed) in [(None, false), (Some("owner-secret"), true)] {
+            let document = PdfDocument::open_with_password(&path, password)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                document.structured_text(0).unwrap().plain_text(),
+                "Chapter one"
+            );
+            let mut viewer = Viewer::new(document);
+            let ctx = egui::Context::default();
+            let run = |viewer: &mut Viewer, events| {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 720.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| viewer.ui(ui, &mut false),
+                )
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while viewer.rendered.is_none() {
+                run(&mut viewer, vec![]);
+                assert!(std::time::Instant::now() < deadline, "page did not render");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(viewer.page_texture.is_some(), "{:?}", viewer.error);
+            run(
+                &mut viewer,
+                vec![egui::Event::Key {
+                    key: egui::Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                }],
+            );
+            let output = run(&mut viewer, vec![egui::Event::Copy]);
+            let copied = output
+                .platform_output
+                .commands
+                .iter()
+                .find_map(|cmd| match cmd {
+                    egui::OutputCommand::CopyText(text) => Some(text.as_str()),
+                    _ => None,
+                });
+            assert_eq!(copied, allowed.then_some("Chapter one"));
+        }
+    }
+
+    #[test]
+    fn selected_page_does_not_steal_field_copy_and_escape_clears_before_quitting() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            crate::document::tests::sample_pdf(
+                "BT /F1 16 Tf 40 350 Td (Selectable text) Tj ET",
+                false,
+            ),
+        )
+        .unwrap();
+        let mut viewer = Viewer::new(crate::document::PdfDocument::open(file.path()).unwrap());
+        let ctx = egui::Context::default();
+        let command = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let run = |viewer: &mut Viewer, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(960.0, 720.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| viewer.ui(ui, &mut false),
+            )
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while viewer.rendered.is_none() {
+            run(&mut viewer, vec![]);
+            assert!(std::time::Instant::now() < deadline, "page did not render");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(viewer.page_texture.is_some(), "{:?}", viewer.error);
+        run(&mut viewer, vec![command(egui::Key::A)]);
+        run(&mut viewer, vec![command(egui::Key::L)]);
+        run(&mut viewer, vec![egui::Event::Text("137.5".into())]);
+        run(&mut viewer, vec![command(egui::Key::A)]);
+        let output = run(&mut viewer, vec![egui::Event::Copy]);
+        assert!(
+            output
+                .platform_output
+                .commands
+                .iter()
+                .any(|cmd| matches!(cmd,
+            egui::OutputCommand::CopyText(text) if text == "137.5"))
+        );
+        let escape = || egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(&mut viewer, vec![escape()]); // Field cancels.
+        assert!(!viewer.quit);
+        run(&mut viewer, vec![escape()]); // Selection clears.
+        assert!(!viewer.quit);
+        run(&mut viewer, vec![escape()]);
+        assert!(viewer.quit);
+    }
 
     #[test]
     fn zoom_entry_applies_typed_value_and_escape_cancels_without_quitting() {

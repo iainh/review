@@ -55,6 +55,15 @@ Search wraps at both ends. The current occurrence is orange and other matches
 on the page are yellow. **Escape** or **Close** closes search and clears highlights.
 Search uses the PDF's text layer; scanned images without text require OCR.
 
+Drag across page text to select it, double-click a word or triple-click a
+paragraph. Use **Ctrl+A** (**Cmd+A** on macOS) to select all text on the
+displayed page, then **Ctrl+C** (**Cmd+C**) or right-click **Copy**. Selection
+is blue, survives zoom changes and clears on page changes. **Escape** clears
+selection before quitting. These shortcuts still edit text when a toolbar
+field has focus. Copying requires the PDF's copy permission. Extraction uses
+MuPDF's column segmentation and Unicode text layer; complex layouts or PDFs
+without accurate Unicode mappings may not copy in the intended reading order.
+
 The sidebar has **Outline** and **Pages** tabs. Click a bookmark or preview to
 navigate, and use the arrows to collapse or expand nested bookmarks. PDFs
 without bookmarks show “This document has no outline.” The current preview is
@@ -221,14 +230,19 @@ With `REVIEW_TEST_PDF` set, run `cargo test handbook_ -- --ignored` to check
 known search results and bounded preview caching. The handbook has no embedded
 outline, so the Wayland test also generates a small nested-bookmark fixture.
 
+Run `bash tests/wayland-selection.sh` in the same session, with `wl-clipboard`
+installed, to check native selection and clipboard contents. It generates
+interleaved-column, rotated-text and copy-restricted PDF fixtures and checks
+that page, zoom and search fields retain their own editing shortcuts.
+
 For headless Wayland testing, start Sway with `tests/sway.conf`,
 `WLR_BACKENDS=headless`, `WLR_RENDERER=pixman`, and `WLR_LIBINPUT_NO_DEVICES=1`.
 Set `XDG_RUNTIME_DIR` to a private directory (mode 700). Point `WAYLAND_DISPLAY`
 and `SWAYSOCK` at the sockets Sway creates in it. The test assumes a 1280×900
 output at scale one. No X server is used.
 
-This is a foundation, not a complete viewer. Text selection, links,
-annotations, tabs, and persistent preferences are not implemented yet.
+This is a foundation, not a complete viewer. Links, annotations, tabs, and
+persistent preferences are not implemented yet.
 
 ## CI and releases
 

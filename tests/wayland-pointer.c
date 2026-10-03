@@ -42,8 +42,10 @@ static void settle(struct wl_display *display) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 4 || (strcmp(argv[1], "click") && strcmp(argv[1], "drag") && strcmp(argv[1], "scroll"))) {
-        fprintf(stderr, "usage: pointer click x y | drag x y x2 y2 | scroll x y delta\n");
+    if (argc < 4 || (strcmp(argv[1], "click") && strcmp(argv[1], "double") &&
+        strcmp(argv[1], "triple") && strcmp(argv[1], "right") &&
+        strcmp(argv[1], "drag") && strcmp(argv[1], "scroll"))) {
+        fprintf(stderr, "usage: pointer click|double|triple|right x y | drag x y x2 y2 | scroll x y delta\n");
         return 1;
     }
     struct wl_display *display = wl_display_connect(NULL);
@@ -76,6 +78,37 @@ int main(int argc, char **argv) {
         settle(display);
         zwlr_virtual_pointer_v1_axis_stop(pointer, now(), WL_POINTER_AXIS_VERTICAL_SCROLL);
         zwlr_virtual_pointer_v1_frame(pointer);
+    } else if (!strcmp(argv[1], "double") || !strcmp(argv[1], "triple")) {
+        int count = !strcmp(argv[1], "double") ? 2 : 3;
+        for (int i = 0; i < count; i++) {
+            zwlr_virtual_pointer_v1_button(pointer, now(), BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED);
+            zwlr_virtual_pointer_v1_frame(pointer);
+            wl_display_roundtrip(display);
+            usleep(40000);
+            zwlr_virtual_pointer_v1_button(pointer, now(), BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED);
+            zwlr_virtual_pointer_v1_frame(pointer);
+            wl_display_roundtrip(display);
+            usleep(60000);
+        }
+    } else if (!strcmp(argv[1], "right")) {
+        zwlr_virtual_pointer_v1_button(pointer, now(), BTN_RIGHT, WL_POINTER_BUTTON_STATE_PRESSED);
+        zwlr_virtual_pointer_v1_frame(pointer);
+        settle(display);
+        zwlr_virtual_pointer_v1_button(pointer, now(), BTN_RIGHT, WL_POINTER_BUTTON_STATE_RELEASED);
+        zwlr_virtual_pointer_v1_frame(pointer);
+        // Keep the same pointer device for a menu action, avoiding artificial
+        // leave/enter events between opening the popup and clicking its item.
+        if (argc == 6) {
+            settle(display);
+            zwlr_virtual_pointer_v1_motion_absolute(pointer, now(), atoi(argv[4]), atoi(argv[5]), 1280, 900);
+            zwlr_virtual_pointer_v1_frame(pointer);
+            settle(display);
+            zwlr_virtual_pointer_v1_button(pointer, now(), BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED);
+            zwlr_virtual_pointer_v1_frame(pointer);
+            settle(display);
+            zwlr_virtual_pointer_v1_button(pointer, now(), BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED);
+            zwlr_virtual_pointer_v1_frame(pointer);
+        }
     } else {
         zwlr_virtual_pointer_v1_button(pointer, now(), BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED);
         zwlr_virtual_pointer_v1_frame(pointer);
