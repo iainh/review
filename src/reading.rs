@@ -1,5 +1,5 @@
 //! Virtualized reading surface; the worker still owns all PDF rasterization.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use egui::{Color32, Pos2, Rect, Vec2};
@@ -9,7 +9,7 @@ use crate::{
     layout::{LayoutMode, PageLayout, PageTransform, Rotation},
     links::{self, LinkTarget, PageLink},
     navigation::ViewState,
-    render_worker::{Priority, RenderKey, RenderWorker},
+    render_worker::{PageTile, Priority, RenderKey, RenderWorker, TILE_SIDE, visible_tiles},
     search::Search,
     selection::Selection,
     zoom::{POINT_SCALE, Zoom},
@@ -20,7 +20,7 @@ const VISIBLE_PAGES: usize = 12;
 
 #[derive(Default)]
 pub struct DisplayPage {
-    pub texture: Option<egui::TextureHandle>,
+    /// Set only when every currently visible tile is ready.
     pub rendered: Option<RenderKey>,
     pub links: Vec<PageLink>,
 }
@@ -33,6 +33,7 @@ pub struct ReadingSurface {
     pub effective_zoom: f32,
     sizes: Vec<(f32, f32)>,
     pub displayed: BTreeMap<usize, DisplayPage>,
+    pub textures: HashMap<RenderKey, egui::TextureHandle>,
     pub screen_pages: Vec<(usize, PageTransform)>,
     last_view: Option<(Zoom, LayoutMode, Rotation, Vec2, usize)>,
     offset: Vec2,
@@ -50,6 +51,49 @@ pub struct ReadingFrame<'a> {
     pub view: &'a mut ViewState,
     pub restore: &'a mut bool,
     pub reveal_match: &'a mut bool,
+}
+
+/// Raster density may fall only when the visible physical viewport itself
+/// exceeds the GPU budget. Logical layout and original-page geometry stay put.
+fn page_tiles(
+    pages: &[(usize, PageTransform)],
+    sizes: &[(f32, f32)],
+    clip: Rect,
+    mut scale: f32,
+    max_side: usize,
+) -> Result<(f32, Vec<Vec<PageTile>>, usize)> {
+    loop {
+        let tiles = pages
+            .iter()
+            .map(|&(page, transform)| {
+                let visible = clip.intersect(transform.rect);
+                let a = Pos2::from(transform.normalized(visible.min));
+                let b = Pos2::from(transform.normalized(visible.max));
+                visible_tiles(
+                    RenderKey::new(page, scale),
+                    sizes[page],
+                    if visible.is_positive() {
+                        Rect::from_min_max(a.min(b), a.max(b))
+                    } else {
+                        Rect::NOTHING
+                    },
+                    max_side,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let bytes = tiles
+            .iter()
+            .flatten()
+            .map(|tile| {
+                let [width, height] = tile.key.image_size(sizes[tile.key.page]);
+                width * height * 4
+            })
+            .sum();
+        if bytes <= TEXTURE_BYTES {
+            return Ok((scale, tiles, bytes));
+        }
+        scale *= 0.5;
+    }
 }
 
 impl ReadingSurface {
@@ -162,7 +206,6 @@ impl ReadingSurface {
         let old_offset = self.offset;
         let mut activated = None;
         let mut error = None;
-        let mut rendering = false;
         let output = scroll.show_viewport(ui, |ui, viewport| {
             let origin = ui.min_rect().min;
             let content = Rect::from_min_size(origin, layout.size);
@@ -187,14 +230,34 @@ impl ReadingSurface {
                     )
                 })
                 .collect();
+            let max_side = ui.input(|input| input.max_texture_side);
+            let (raster_scale, tiles, requested_bytes) = match page_tiles(
+                &self.screen_pages,
+                &self.sizes,
+                ui.clip_rect(),
+                layout.scale * dpi,
+                max_side,
+            ) {
+                Ok(plan) => plan,
+                Err(e) => {
+                    error = Some(format!("Cannot plan page tiles: {e:#}"));
+                    (
+                        layout.scale * dpi,
+                        visible.iter().map(|_| Vec::new()).collect(),
+                        0,
+                    )
+                }
+            };
+            let wanted: HashSet<_> = tiles.iter().flatten().map(|tile| tile.key).collect();
+            self.textures.retain(|key, _| wanted.contains(key));
             let mut bytes: usize = self
-                .displayed
+                .textures
                 .values()
-                .filter_map(|p| p.texture.as_ref())
                 .map(|t| t.size()[0] * t.size()[1] * 4)
                 .sum();
-            let mut requested_bytes = 0.0;
-            for (placement, &(_, transform)) in visible.iter().zip(&self.screen_pages) {
+            for ((placement, &(_, transform)), tiles) in
+                visible.iter().zip(&self.screen_pages).zip(tiles)
+            {
                 let entry = self
                     .displayed
                     .entry(placement.page)
@@ -208,56 +271,64 @@ impl ReadingSurface {
                             DisplayPage::default()
                         }
                     });
-                let key = RenderKey::new(placement.page, layout.scale * dpi);
-                let size = self.sizes[placement.page];
-                let estimate = (size.0 * key.scale()).ceil() * (size.1 * key.scale()).ceil() * 4.0;
-                requested_bytes += estimate;
-                if entry.rendered != Some(key) {
-                    let old_bytes = entry
-                        .texture
-                        .as_ref()
-                        .map_or(0, |t| t.size()[0] * t.size()[1] * 4);
-                    if requested_bytes <= TEXTURE_BYTES as f32
-                        && (bytes - old_bytes) as f32 + estimate <= TEXTURE_BYTES as f32
+                let key = RenderKey::new(placement.page, raster_scale);
+                let mut ready = !tiles.is_empty();
+                let mut painted = false;
+                let mut rendering = false;
+                ui.painter()
+                    .rect_filled(transform.rect, 0.0, Color32::WHITE);
+                for tile in tiles {
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        self.textures.entry(tile.key)
                     {
-                        match worker.image(key, Priority::Page) {
+                        // Loaded GPU tiles need no new worker request. Otherwise
+                        // pixel-cache eviction could requeue an already drawn tile.
+                        match worker.image(tile.key, Priority::Page) {
                             Some(Ok(image)) => {
                                 let new_bytes = image.rgba.len();
-                                if bytes - old_bytes + new_bytes <= TEXTURE_BYTES {
-                                    entry.texture = Some(ui.ctx().load_texture(
-                                        format!("PDF page {}", key.page + 1),
+                                if bytes + new_bytes <= TEXTURE_BYTES {
+                                    e.insert(ui.ctx().load_texture(
+                                        format!("PDF page {} tile", key.page + 1),
                                         egui::ColorImage::from_rgba_unmultiplied(
                                             [image.width as usize, image.height as usize],
                                             &image.rgba,
                                         ),
                                         egui::TextureOptions::LINEAR,
                                     ));
-                                    bytes = bytes - old_bytes + new_bytes;
-                                    entry.rendered = Some(key);
+                                    bytes += new_bytes;
+                                } else {
+                                    error = Some(
+                                        "Visible tile textures exceed the graphics memory budget"
+                                            .into(),
+                                    );
                                 }
                             }
                             Some(Err(e)) => {
-                                bytes -= old_bytes;
-                                entry.texture = None;
-                                entry.rendered = Some(key);
                                 error = Some(e);
                             }
                             None => rendering = true,
                         }
+                    }
+                    if let Some(texture) = self.textures.get(&tile.key) {
+                        if tile.key == key {
+                            transform.image(ui.painter(), texture.id());
+                        } else {
+                            transform.image_region(
+                                ui.painter(),
+                                texture.id(),
+                                tile.bounds,
+                                tile.uv,
+                            );
+                        }
+                        painted = true;
                     } else {
-                        error = Some(
-                            "Visible pages exceed the rendering memory limit; reduce the zoom"
-                                .into(),
-                        );
+                        ready = false;
                     }
                 }
-                ui.painter()
-                    .rect_filled(transform.rect, 0.0, Color32::WHITE);
-                if let Some(texture) = &entry.texture {
-                    transform.image(ui.painter(), texture.id());
-                } else {
+                entry.rendered = ready.then_some(key);
+                if !painted {
                     ui.painter().text(
-                        transform.rect.center(),
+                        transform.rect.intersect(ui.clip_rect()).center(),
                         egui::Align2::CENTER_CENTER,
                         if rendering {
                             "Rendering page…"
@@ -298,16 +369,18 @@ impl ReadingSurface {
                     }
                 }
             }
-            if self.mode == LayoutMode::Single && requested_bytes < 32.0 * 1024.0 * 1024.0 {
+            if self.mode == LayoutMode::Single && requested_bytes < 32 * 1024 * 1024 {
                 for page in [view.page.checked_sub(1), view.page.checked_add(1)]
                     .into_iter()
                     .flatten()
                 {
-                    if let Some(size) = self.sizes.get(page)
-                        && size.0 * size.1 * layout.scale.powi(2) * dpi.powi(2) * 4.0
-                            < 32.0 * 1024.0 * 1024.0
-                    {
-                        worker.image(RenderKey::new(page, layout.scale * dpi), Priority::Prefetch);
+                    if let Some(&size) = self.sizes.get(page) {
+                        let key = RenderKey::new(page, raster_scale);
+                        let [width, height] = key.image_size(size);
+                        let side = (TILE_SIDE as usize).min(max_side.saturating_sub(2));
+                        if width <= side && height <= side {
+                            worker.image(key, Priority::Prefetch);
+                        }
                     }
                 }
             }
@@ -399,5 +472,66 @@ impl ReadingSurface {
             bail!(error);
         }
         Ok(activated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotated_viewport_requests_only_original_page_tile_bounds() {
+        let transform = PageTransform {
+            rect: Rect::from_min_size(egui::pos2(-7000.0, -3000.0), Vec2::new(14000.0, 7000.0)),
+            rotation: Rotation::Clockwise,
+        };
+        let clip = Rect::from_min_max(egui::pos2(100.0, 80.0), egui::pos2(1500.0, 880.0));
+        let (scale, pages, bytes) =
+            page_tiles(&[(0, transform)], &[(10000.0, 20000.0)], clip, 2.0, 8192).unwrap();
+        assert_eq!(scale, 2.0);
+        assert_eq!(pages[0].len(), 15);
+        assert_eq!(
+            pages[0][0].bounds.min,
+            egui::pos2(8192.0 / 20000.0, 15360.0 / 40000.0)
+        );
+        assert_eq!(
+            pages[0][14].bounds.max,
+            egui::pos2(11264.0 / 20000.0, 20480.0 / 40000.0)
+        );
+        assert!(bytes < TEXTURE_BYTES);
+    }
+
+    #[test]
+    fn dense_viewports_reduce_raster_density_not_logical_geometry() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(4096.0));
+        let transform = PageTransform {
+            rect,
+            rotation: Rotation::None,
+        };
+        let (scale, pages, bytes) =
+            page_tiles(&[(0, transform)], &[(4096.0, 4096.0)], rect, 4.0, 8192).unwrap();
+        assert_eq!(scale, 1.0);
+        assert_eq!(pages[0].len(), 16);
+        assert_eq!(bytes, 4102 * 4102 * 4);
+        assert_eq!(transform.screen([0.25, 0.75]), egui::pos2(1024.0, 3072.0));
+        let small = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 600.0));
+        let (scale, pages, bytes) = page_tiles(
+            &[(
+                0,
+                PageTransform {
+                    rect: small,
+                    rotation: Rotation::None,
+                },
+            )],
+            &[(400.0, 600.0)],
+            small,
+            1.0,
+            8192,
+        )
+        .unwrap();
+        assert_eq!(scale, 1.0);
+        assert_eq!(pages[0].len(), 1);
+        assert_eq!(pages[0][0].key, RenderKey::new(0, 1.0));
+        assert_eq!(bytes, 400 * 600 * 4);
     }
 }

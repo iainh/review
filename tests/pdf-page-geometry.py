@@ -7,6 +7,7 @@ import sys
 import time
 
 import pyatspi
+from gi.repository import GLib
 
 
 def walk(node):
@@ -24,25 +25,30 @@ for name in ["IsEnabled", "ScreenReaderEnabled"]:
 
 role = sys.argv[3] if len(sys.argv) > 3 else "image"
 for _ in range(100):
-    image = next((node for app in pyatspi.Registry.getDesktop(0) for node in walk(app)
-                  if node.getRoleName() == role and node.name == sys.argv[2]), None)
-    if image:
-        # Wayland does not expose global window positions to winit. Combine
-        # window-local AccessKit bounds with Sway's actual client-area origin.
-        tree = json.loads(subprocess.check_output(["swaymsg", "-t", "get_tree"]))
-        pending = [tree]
-        while pending:
-            window = pending.pop()
-            if window.get("pid") == image.getApplication().get_process_id():
-                rect = image.queryComponent().getExtents(pyatspi.WINDOW_COORDS)
-                origin = window["rect"]
-                client = window["window_rect"]
-                Path(sys.argv[1]).write_text(json.dumps([
-                    origin["x"] + client["x"] + rect.x,
-                    origin["y"] + client["y"] + rect.y,
-                    rect.width, rect.height,
-                ]))
-                sys.exit(0)
-            pending.extend(window.get("nodes", []) + window.get("floating_nodes", []))
+    try:
+        image = next((node for app in pyatspi.Registry.getDesktop(0) for node in walk(app)
+                      if node.getRoleName() == role and node.name == sys.argv[2]), None)
+        if image:
+            # Wayland does not expose global window positions to winit. Combine
+            # window-local AccessKit bounds with Sway's actual client-area origin.
+            tree = json.loads(subprocess.check_output(["swaymsg", "-t", "get_tree"]))
+            pending = [tree]
+            while pending:
+                window = pending.pop()
+                if window.get("pid") == image.getApplication().get_process_id():
+                    rect = image.queryComponent().getExtents(pyatspi.WINDOW_COORDS)
+                    origin = window["rect"]
+                    client = window["window_rect"]
+                    Path(sys.argv[1]).write_text(json.dumps([
+                        origin["x"] + client["x"] + rect.x,
+                        origin["y"] + client["y"] + rect.y,
+                        rect.width, rect.height,
+                    ]))
+                    sys.exit(0)
+                pending.extend(window.get("nodes", []) + window.get("floating_nodes", []))
+    except GLib.Error:
+        # Nodes can disappear between enumerating and reading the live tree.
+        # Retry the complete lookup within the existing bounded deadline.
+        pass
     time.sleep(0.1)
 raise AssertionError(f"No rendered {sys.argv[2]}")

@@ -92,13 +92,25 @@ impl PageTransform {
     }
 
     pub fn image(self, painter: &egui::Painter, texture: egui::TextureId) {
+        let unit = Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0));
+        self.image_region(painter, texture, unit, unit);
+    }
+
+    pub fn image_region(
+        self,
+        painter: &egui::Painter,
+        texture: egui::TextureId,
+        bounds: Rect,
+        uv: Rect,
+    ) {
         let mut mesh = egui::Mesh::with_texture(texture);
         // Rotate vertex positions, not pixels: rendering remains in the worker,
         // with no second bitmap/cache or rounding-dependent annotation transform.
-        for uv in [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]] {
+        for corner in [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]] {
+            let point = bounds.min + Vec2::from(corner) * bounds.size();
             mesh.vertices.push(egui::epaint::Vertex {
-                pos: self.screen(uv),
-                uv: Pos2::from(uv),
+                pos: self.screen([point.x, point.y]),
+                uv: uv.min + Vec2::from(corner) * uv.size(),
                 color: egui::Color32::WHITE,
             });
         }
@@ -228,6 +240,43 @@ impl PageLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rotated_tile_mesh_maps_original_core_and_overlap_uvs() {
+        let transform = PageTransform {
+            rect: Rect::from_min_size(egui::pos2(37.0, 83.0), Vec2::new(800.0, 300.0)),
+            rotation: Rotation::Clockwise,
+        };
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            transform.image_region(
+                ui.painter(),
+                egui::TextureId::User(7),
+                Rect::from_min_max(egui::pos2(0.1, 0.2), egui::pos2(0.3, 0.6)),
+                Rect::from_min_max(egui::pos2(0.01, 0.02), egui::pos2(0.9, 0.8)),
+            );
+        });
+        let mesh = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(mesh.texture_id, egui::TextureId::User(7));
+        assert_eq!(mesh.indices, [0, 1, 2, 0, 2, 3]);
+        assert_eq!(mesh.vertices.len(), 4);
+        for (vertex, (position, uv)) in mesh.vertices.iter().zip([
+            ([677.0, 113.0], [0.01, 0.02]),
+            ([677.0, 173.0], [0.9, 0.02]),
+            ([357.0, 173.0], [0.9, 0.8]),
+            ([357.0, 113.0], [0.01, 0.8]),
+        ]) {
+            assert!(vertex.pos.distance(egui::Pos2::from(position)) < 0.001);
+            assert!(vertex.uv.distance(egui::Pos2::from(uv)) < 0.00001);
+        }
+    }
 
     #[test]
     fn rotations_preserve_asymmetric_points_and_overlay_bounds() {

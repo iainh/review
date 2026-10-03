@@ -24,9 +24,9 @@ impl Zoom {
         match self {
             Self::FitPage => (width / page.0).min(height / page.1),
             Self::FitWidth => width / page.0,
-            Self::Percent(value) => value * POINT_SCALE * dpi,
+            Self::Percent(value) => (value * POINT_SCALE * dpi).max(0.01),
         }
-        .max(0.01)
+        .max(f32::MIN_POSITIVE)
     }
 
     pub fn change(&mut self, factor: f32, effective: f32) {
@@ -65,6 +65,20 @@ mod tests {
         let mut zoom = Zoom::FitWidth;
         zoom.change(1.25, 2.0 / POINT_SCALE);
         assert_eq!(zoom.scale((632, 432), (300.0, 800.0), 1.0), 2.5);
+    }
+
+    #[test]
+    fn huge_pages_fit_viewports_and_thumbnails_below_the_old_scale_floor() {
+        let size = (1_000_000.0, 600_000.0);
+        let page = Zoom::FitPage.scale((1032, 532), size, 1.0);
+        assert!((page * size.1 - 500.0).abs() < 0.001);
+        assert!((page * size.0 - 833.3333).abs() < 0.001);
+        let width = Zoom::FitWidth.scale((1032, 532), size, 1.0);
+        assert!((width * size.0 - 1000.0).abs() < 0.001);
+        let thumbnail = Zoom::FitPage.scale((244, 244), size, 1.0);
+        assert!((thumbnail * size.0 - 212.0).abs() < 0.001);
+        assert!((thumbnail * size.1 - 127.2).abs() < 0.001);
+        assert_eq!(Zoom::Percent(1.0).scale((244, 244), size, 1.0), POINT_SCALE);
     }
 
     #[test]

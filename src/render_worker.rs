@@ -683,6 +683,24 @@ mod tests {
         );
         assert!(!state.cache.contains_key(&RenderKey::new(0, 1.0)));
         assert!(state.cache.contains_key(&RenderKey::new(8, 1.0)));
+        let image = Arc::new(PageImage {
+            width: 1026,
+            height: 1026,
+            rgba: vec![255; 1026 * 1026 * 4],
+        });
+        for x in 0..40 {
+            state.insert(
+                RenderKey {
+                    region: Some([x * 1024, 0, x * 1024 + 1026, 1026]),
+                    ..RenderKey::new(0, 1.0)
+                },
+                Ok(image.clone()),
+            );
+            assert!(state.cache.values().map(Cached::bytes).sum::<usize>() <= CACHE_BYTES);
+        }
+        // The byte cap, not the old 12-page cap or 128-tile entry cap, wins.
+        assert_eq!(state.cache.len(), 31);
+        assert!(state.cache.keys().all(|key| key.region.is_some()));
     }
 
     #[test]

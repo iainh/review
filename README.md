@@ -44,14 +44,17 @@ can be scrolled horizontally and vertically. Use **Ctrl+L** (**Cmd+L** on macOS)
 enter a zoom from 10 to 1600%; **Enter** applies it and **Escape** cancels.
 Percentage zoom is independent of window size: 100% uses 96 logical pixels
 per inch for PDF points (72 per inch). Fit modes adapt to the viewport and
-display their effective percentage. Very large page renders report a memory
-limit error instead of allocating an unbounded image.
+display their effective percentage. Large pages and high zoom render only the
+visible region in overlapping tiles, without allocating a whole-page image.
+If the visible tiles alone exceed 128 MiB, raster density falls while page
+geometry, zoom and overlays stay unchanged. Fit modes also support huge pages
+at percentages below the explicit 10% minimum.
 
 Use **Layout** to choose **Single page**, **Continuous** vertical scrolling or
 **Facing pages** in continuous pairs (1–2, 3–4, with an unpaired final page).
 Pages retain their proportions and share one scale; multi-page fit modes use
 the largest page or spread so scrolling does not change the zoom. Only visible
-pages are displayed, with at most 12 page textures and a 128 MiB texture budget.
+pages are displayed, with at most 12 visible pages and a 128 MiB tile-texture budget.
 Use **Rotate left/right** or **Shift+R**/**R** to rotate in 90° steps. Rotation
 also applies to links, search and text-selection highlights; it does not change
 the PDF or printed pages. **Hand tool** pans by dragging; **H** toggles between
@@ -439,9 +442,12 @@ If Review was your default, choose another PDF viewer before uninstalling.
 - Visible pages take priority over previews and nearby-page prefetching.
   Superseded queued work is cancelled; in-flight page operations finish but
   stale results are discarded. Replacing a PDF does not wait for old renders.
-- The worker keeps at most 12 pixel results within a 128 MiB cache. Large
-  renders skip prefetching, and off-screen preview textures are released.
-- wgpu uploads that page once and composites it as a texture on the GPU.
+- The worker keeps a 128 MiB pixel cache, with up to 128 entries and at most
+  12 whole-page results. Large pages use 1024-pixel tile cores and one-pixel
+  overlap for filtering. Large renders skip neighbour prefetching; off-screen
+  page tiles and preview textures are released.
+- wgpu uploads visible tiles once and composites their cores through the shared
+  page transform. Rotation changes vertex positions, not cached raster pixels.
 - The window redraws on demand rather than continuously.
 - Native egui controls share the winit window and wgpu surface with the page;
   there is no web runtime.
@@ -542,6 +548,13 @@ scrolling. It captures native hover and Copy Link states and compares restored
 page pixels with ImageMagick (`magick` is required in addition to the Wayland
 tools above). It never activates external links; Rust tests inspect egui's URL
 and clipboard requests without dispatching them to external applications.
+
+`bash tests/wayland-tiles.sh` checks a 20000×12000-point PDF with an offset
+MediaBox. It verifies cross-tile selection, distant internal links and text,
+panning, pixel-identical Back history, 1600% zoom, search and Fit page. Set
+`REVIEW_SCREENSHOTS` to retain native captures for seam and overlay inspection.
+Rust tests separately check asymmetric tile bounds/UVs, cropped pixels,
+nonzero origins, intrinsic rotation, cache limits and stale results.
 
 `tests/reading-layouts.py` checks native facing/continuous layouts, rotated
 cross-page selection, pointer-centred zoom, hand panning, fullscreen and rotated

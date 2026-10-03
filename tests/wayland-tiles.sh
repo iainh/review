@@ -77,9 +77,9 @@ key 1
 expect_zoom '100%'
 page_geometry
 capture initial
-pointer double 642 267
+pointer double 740 267 # "crossing" straddles the 768-point / 1024-pixel tile edge.
 command c
-clipboard Tile
+clipboard crossing
 capture selection
 key Escape
 pointer click 130 116 # Internal destination far outside the initial raster.
@@ -101,9 +101,20 @@ magick "$scratch/back.png" -crop 1240x790+10+65 +repage "$scratch/b.png"
 magick compare -metric AE "$scratch/a.png" "$scratch/b.png" null: 2>"$scratch/difference"
 echo 'PASS: pan/link history restores exact visible pixels'
 zoom 1600
+command f
+wtype -s 150 'Distant needle' -s 150 -k Return -s 150
+sleep 1
+# A known coloured/text region, not an empty white portion of the huge page.
+rm -f "$scratch/match.json"
+swaymsg "exec /usr/bin/python3 '$geometry' '$scratch/match.json' '1 / 1 matches' 'label' > '$scratch/match.log' 2>&1" >/dev/null
+for _ in {1..100}; do [[ -f "$scratch/match.json" ]] && break; sleep .1; done
+if [[ ! -f "$scratch/match.json" ]]; then cat "$scratch/match.log" >&2; exit 1; fi
 capture maximum-zoom
+key Escape
+capture maximum-zoom-page
 zoom 400
 command f
+command a
 wtype -s 150 'Distant needle' -s 150 -k Return -s 150
 sleep 1
 capture search

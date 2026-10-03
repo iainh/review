@@ -154,6 +154,7 @@ impl Viewer {
     fn invalidate_document(&mut self, ctx: &Context) {
         self.render_worker = RenderWorker::new(self.document.worker_source());
         self.reading.displayed.clear();
+        self.reading.textures.clear();
         self.sidebar.clear_previews();
         self.selection.clear();
         self.search.reload_document(&self.document, ctx);
@@ -1055,6 +1056,7 @@ impl Viewer {
         if shortcuts && self.inspector.ui(&ctx, &mut self.document) {
             self.render_worker = RenderWorker::new(self.document.worker_source());
             self.reading.displayed.clear();
+            self.reading.textures.clear();
             self.sidebar.clear_previews();
             self.search.reload_document(&self.document, &ctx);
             self.selection.clear();
@@ -1258,7 +1260,7 @@ mod tests {
                             - viewer.effective_zoom)
                             .abs()
                             < 0.0001
-                    }) && p.texture.is_some()
+                    })
                 })
                 && !viewer.restore_position;
             if ready {
@@ -1279,6 +1281,74 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn huge_page_pan_zoom_and_snapshot_changes_release_obsolete_gpu_tiles() {
+        use crate::{layout::Rotation, zoom::Zoom};
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), crate::document::tests::huge_pdf()).unwrap();
+        let mut viewer = Viewer::new(crate::document::PdfDocument::open(file.path()).unwrap());
+        viewer.sidebar.open = false;
+        viewer.zoom = Zoom::Percent(1.0);
+        viewer.position = [731.0, 553.0];
+        viewer.restore_position = true;
+        let ctx = egui::Context::default();
+        settled_frame(&mut viewer, &ctx);
+        let original: std::collections::HashSet<_> =
+            viewer.reading.textures.keys().copied().collect();
+        assert!(original.len() > 1);
+        assert_eq!(viewer.position, [731.0, 553.0]);
+        viewer.position = [4000.0, 3000.0];
+        viewer.restore_position = true;
+        settled_frame(&mut viewer, &ctx);
+        assert!(
+            viewer
+                .reading
+                .textures
+                .keys()
+                .all(|key| !original.contains(key))
+        );
+        for rotation in [
+            Rotation::None,
+            Rotation::Clockwise,
+            Rotation::Half,
+            Rotation::Counterclockwise,
+        ] {
+            viewer.reading.rotation = rotation;
+            viewer.zoom = Zoom::Percent(16.0);
+            viewer.restore_position = true;
+            settled_frame(&mut viewer, &ctx);
+            assert!(viewer.error.is_none(), "{:?}", viewer.error);
+            assert!(viewer.reading.textures.len() <= 9);
+            let bytes: usize = viewer
+                .reading
+                .textures
+                .values()
+                .map(|t| t.size()[0] * t.size()[1] * 4)
+                .sum();
+            assert!(bytes <= 128 * 1024 * 1024);
+            assert!(
+                viewer
+                    .reading
+                    .textures
+                    .keys()
+                    .all(|key| key.scale() == 16.0 * crate::zoom::POINT_SCALE)
+            );
+        }
+        let old_textures: std::collections::HashSet<_> =
+            viewer.reading.textures.values().map(|t| t.id()).collect();
+        viewer.invalidate_document(&ctx);
+        assert!(viewer.reading.textures.is_empty());
+        assert!(viewer.reading.displayed.is_empty());
+        settled_frame(&mut viewer, &ctx);
+        assert!(
+            viewer
+                .reading
+                .textures
+                .values()
+                .all(|t| !old_textures.contains(&t.id()))
+        );
     }
 
     #[test]
@@ -1556,18 +1626,10 @@ mod tests {
     fn link_hover_click_and_copy_do_not_open_external_urls_without_a_primary_click() {
         let (_directory, mut viewer) = links_viewer();
         let ctx = egui::Context::default();
-        let output = settled_frame(&mut viewer, &ctx);
-        let texture = viewer.reading.displayed[&0].texture.as_ref().unwrap().id();
-        let page = output
-            .shapes
-            .iter()
-            .find_map(|shape| match &shape.shape {
-                egui::Shape::Mesh(mesh) if mesh.texture_id == texture => Some(mesh.calc_bounds()),
-                _ => None,
-            })
-            .unwrap();
-        let point = viewer.reading.displayed[&0].links[2]
-            .screen_bounds(page)
+        settled_frame(&mut viewer, &ctx);
+        let page = viewer.reading.screen_pages[0].1;
+        let point = page
+            .bounds(viewer.reading.displayed[&0].links[2].bounds)
             .center();
         let output = frame(&mut viewer, &ctx, vec![egui::Event::PointerMoved(point)]);
         assert_eq!(
