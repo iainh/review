@@ -3,6 +3,7 @@
 mod document;
 #[cfg(target_os = "macos")]
 mod macos;
+mod printing;
 mod render_worker;
 mod renderer;
 mod search;
@@ -178,6 +179,9 @@ impl ApplicationHandler<PathBuf> for App {
                 );
                 if let Err(error) = renderer.render(output) {
                     eprintln!("failed to draw frame: {error:#}");
+                }
+                if let Some(viewer) = &mut self.viewer {
+                    viewer.print_if_requested(renderer.window());
                 }
                 if quit {
                     event_loop.exit();

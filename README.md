@@ -61,6 +61,37 @@ without bookmarks show “This document has no outline.” The current preview i
 highlighted and follows page changes. Drag the sidebar edge to resize it; use
 **F9** or **Sidebar** to hide or show it.
 
+## Printing
+
+Use **Print…** or **Ctrl+P** (**Cmd+P** on macOS). Choose **Fit** to scale each
+page to the printable area, or **Actual size** for the PDF's physical dimensions
+(one PDF point is 1/72 inch). Actual size can clip pages larger than the paper.
+Display zoom does not affect printing. Continue to the system print dialog to
+choose the printer, page ranges, paper and orientation. Two-sided options are
+available only when the printer and driver support them; Review does not
+simulate duplex. Cancelling either dialog leaves the document unchanged.
+PDF permissions can disable printing or restrict source content to low-resolution
+output (up to 150 dpi). Restricted output is rasterized on every platform.
+
+- **Linux:** uses GTK 3's native print operation, including its print-to-file
+  backend. Install the GTK 3 runtime and a print backend appropriate for your
+  printer (usually CUPS). GTK is loaded only when printing; missing libraries
+  produce an in-window error. The dialog cannot be parented to the winit window,
+  so your window manager may place it separately. The viewer pauses while the
+  native dialog and print rendering run.
+- **macOS:** uses PDFKit and AppKit's native print panel, with a private,
+  temporary PDF snapshot of the loaded document. No other viewer is launched.
+- **Windows:** uses the native Windows print dialog and renders to its printer
+  drawing context. Printer properties provide paper, orientation and supported
+  duplex options. Up to 32 page ranges can be selected. Print-to-PDF requires a
+  installed PDF printer such as Microsoft Print to PDF.
+
+Linux and Windows print one rasterized page at a time, at up to 300 dpi, with
+lower resolution for unusually large page sizes to bound memory. macOS retains
+vector content when high-quality printing is permitted. These paths submit
+actual print jobs only after confirmation in the native dialog; they do not
+hand the PDF to another application.
+
 ## Downloads
 
 [GitHub releases](https://github.com/iainh/review/releases) provide a Linux
@@ -172,6 +203,12 @@ session described below. It requires a GTK file-chooser portal or Zenity and
 `bash tests/wayland-password.sh` uses the same session and chooser workflow to
 check masked password entry, retry, keyboard and button cancellation, preserved
 navigation, owner access and permission notices with synthetic encrypted PDFs.
+
+`bash tests/wayland-print.sh` checks the print modal, native range and orientation
+controls, cancellation and local PDF export in the same disposable Sway session.
+It requires GTK 3 and `python3-pyatspi` in addition to the tools below. It never
+activates the native Print button or submits a printer job. GTK's export action
+always exports all pages; range selection is checked through accessibility.
 
 `bash tests/wayland.sh` exercises native keyboard and pointer input under Sway
 using the OpenID Connect handbook. It requires `swaymsg`, `wtype`, `grim`,

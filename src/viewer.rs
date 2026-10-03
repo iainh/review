@@ -2,6 +2,7 @@ use egui::{Color32, Context, Key, Modifiers, TextureHandle, Vec2};
 
 use crate::{
     document::PdfDocument,
+    printing::PrintDialog,
     render_worker::{Priority, RenderKey, RenderWorker},
     search::Search,
     sidebar::Sidebar,
@@ -21,6 +22,7 @@ pub struct Viewer {
     search: Search,
     reveal_match: bool,
     sidebar: Sidebar,
+    printing: PrintDialog,
     pub quit: bool,
 }
 
@@ -41,6 +43,7 @@ impl Viewer {
             search: Search::default(),
             reveal_match: false,
             sidebar,
+            printing: PrintDialog::default(),
             quit: false,
         }
     }
@@ -57,6 +60,10 @@ impl Viewer {
 
     pub fn path(&self) -> &std::path::Path {
         self.document.path()
+    }
+
+    pub fn print_if_requested(&mut self, window: &winit::window::Window) {
+        self.printing.run_requested(&self.document, window);
     }
 
     fn go_to_page(&mut self, page: usize) {
@@ -100,6 +107,21 @@ impl Viewer {
     pub fn ui(&mut self, root: &mut egui::Ui, open_requested: &mut bool) {
         self.render_worker.begin_frame();
         let ctx = root.ctx().clone();
+        if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::P)) {
+            if self.document.permissions().print {
+                self.printing.open = true;
+            } else {
+                self.error = Some("This PDF does not allow printing".into());
+            }
+        }
+        // Register the modal backdrop before the viewer and keep its keyboard
+        // events out of global page, search, zoom and sidebar shortcuts.
+        let print_active = self.printing.open;
+        if print_active {
+            self.printing.ui(&ctx, &self.document);
+        }
+        let print_input =
+            print_active.then(|| ctx.input_mut(|input| std::mem::take(&mut input.events)));
         let focus_page = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::G));
         let focus_zoom = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::L));
         if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F9)) {
@@ -109,7 +131,8 @@ impl Viewer {
         if focus_search {
             self.search.open = true;
         }
-        if self.search.open
+        if !self.printing.open
+            && self.search.open
             && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
         {
             self.search.open = false;
@@ -252,6 +275,17 @@ impl Viewer {
                 if ui.button("Open…").on_hover_text("Ctrl+O / Cmd+O").clicked() {
                     *open_requested = true;
                 }
+                if ui
+                    .add_enabled(
+                        self.document.permissions().print,
+                        egui::Button::new("Print…"),
+                    )
+                    .on_hover_text("Ctrl+P / Cmd+P")
+                    .on_disabled_hover_text("This PDF does not allow printing")
+                    .clicked()
+                {
+                    self.printing.open = true;
+                }
             });
             let permissions = self.document.permissions();
             if !permissions.print || !permissions.print_high_quality || !permissions.copy {
@@ -339,7 +373,7 @@ impl Viewer {
 
         // Let text fields consume Escape and settle focus before handling
         // document shortcuts. egui clears focus at the start of an Escape frame.
-        if !ctx.egui_wants_keyboard_input() {
+        if !self.printing.open && !ctx.egui_wants_keyboard_input() {
             let previous = (self.document.current_page(), self.zoom);
             ctx.input(|input| {
                 if input.key_pressed(Key::ArrowLeft) || input.key_pressed(Key::PageUp) {
@@ -510,6 +544,12 @@ impl Viewer {
                 });
         });
         self.render_worker.end_frame(&ctx);
+        if let Some(events) = print_input {
+            ctx.input_mut(|input| input.events = events);
+        }
+        if !print_active {
+            self.printing.ui(&ctx, &self.document);
+        }
     }
 }
 
@@ -583,6 +623,77 @@ mod tests {
         }
         assert_eq!(viewer.zoom, crate::zoom::Zoom::Percent(1.375));
         assert!(!viewer.quit);
+    }
+
+    #[test]
+    fn print_shortcut_and_escape_preserve_search_and_navigation() {
+        let mut viewer = Viewer::new(crate::document::tests::sample_document());
+        viewer.search.open = true;
+        let ctx = egui::Context::default();
+        for (key, modifiers, open) in [
+            (egui::Key::P, egui::Modifiers::COMMAND, true),
+            (egui::Key::ArrowRight, egui::Modifiers::NONE, true),
+            (egui::Key::F9, egui::Modifiers::NONE, true),
+            (egui::Key::Escape, egui::Modifiers::NONE, false),
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key,
+                    modifiers,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
+            assert_eq!(viewer.printing.open, open);
+            assert!(viewer.search.open);
+            assert!(viewer.sidebar.open);
+            assert_eq!(viewer.document.current_page(), 0);
+            assert!(!viewer.quit);
+        }
+    }
+
+    #[test]
+    fn print_shortcut_respects_document_permission() {
+        use mupdf::pdf::{Encryption, Permission};
+        let directory = tempfile::tempdir().unwrap();
+        for (permissions, allowed) in [
+            (Permission::ACCESSIBILITY, false),
+            (Permission::PRINT, true),
+        ] {
+            // A stopped render worker may still be releasing its native file
+            // handle; keep each fixture independent on Windows as well.
+            let path = directory
+                .path()
+                .join(format!("restricted-{}.pdf", permissions.bits()));
+            crate::document::tests::encrypted_fixture(&path, "", permissions, Encryption::Aes256);
+            let mut viewer = Viewer::new(crate::document::PdfDocument::open(&path).unwrap());
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::P,
+                    modifiers: egui::Modifiers::COMMAND,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
+            assert_eq!(viewer.printing.open, allowed);
+            assert_eq!(viewer.error.is_none(), allowed);
+            assert!(!viewer.quit);
+        }
     }
 
     #[test]

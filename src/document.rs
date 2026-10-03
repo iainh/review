@@ -147,6 +147,79 @@ impl PdfDocument {
         self.current_page
     }
 
+    /// Print from the loaded document, independently of display zoom and caches.
+    pub fn print_page(&self, page: usize) -> Result<mupdf::Page> {
+        ensure!(self.permissions().print, "This PDF does not allow printing");
+        ensure!(page < self.page_count, "print page is out of range");
+        self.document
+            .load_page(page as i32)
+            .context("failed to load print page")
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    pub fn print_pdf(&self) -> Result<Vec<u8>> {
+        ensure!(self.permissions().print, "This PDF does not allow printing");
+        // DocumentWriter avoids convert_to_pdf's unsafe error cleanup in
+        // mupdf 0.8. The private temporary directory is deleted on every exit.
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("print.pdf");
+        {
+            let mut writer = mupdf::DocumentWriter::new(
+                path.to_str().context("Invalid temporary PDF path")?,
+                "pdf",
+                "compress",
+            )?;
+            for number in 0..self.page_count {
+                let page = self.print_page(number)?;
+                let bounds = page.bounds()?;
+                ensure!(
+                    [bounds.width(), bounds.height()]
+                        .iter()
+                        .all(|n| n.is_finite() && *n > 0.0),
+                    "Invalid print page dimensions"
+                );
+                let device = writer.begin_page(mupdf::Rect::new(
+                    0.0,
+                    0.0,
+                    bounds.width(),
+                    bounds.height(),
+                ))?;
+                if self.permissions().print_high_quality {
+                    page.run(&device, &Matrix::new_translate(-bounds.x0, -bounds.y0))?;
+                } else {
+                    // Do not pass vector content to PDFKit when the source
+                    // permits only degraded printing. Keep at most 150 dpi.
+                    let size = (bounds.width(), bounds.height());
+                    let scale = (150.0_f32 / 72.0)
+                        .min(16_000.0 / size.0.max(size.1))
+                        .min((32_000_000.0 / (size.0 * size.1)).sqrt());
+                    let pixmap = page.to_pixmap(
+                        &Matrix::new(
+                            scale,
+                            0.0,
+                            0.0,
+                            scale,
+                            -bounds.x0 * scale,
+                            -bounds.y0 * scale,
+                        ),
+                        &Colorspace::device_rgb(),
+                        false,
+                        true,
+                    )?;
+                    let image = mupdf::Image::from_pixmap(&pixmap)?;
+                    device.fill_image(
+                        &image,
+                        &Matrix::new_scale(size.0, size.1),
+                        1.0,
+                        mupdf::ColorParams::default(),
+                    )?;
+                }
+                writer.end_page(device)?;
+            }
+        } // Finalize the PDF before reading it for PDFKit.
+        std::fs::read(&path).context("Failed to read print PDF")
+    }
+
     pub fn go_to_page(&mut self, page: usize) -> bool {
         if page >= self.page_count || page == self.current_page {
             return false;
