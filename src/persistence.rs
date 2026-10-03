@@ -563,6 +563,8 @@ mod tests {
                 page: 1,
                 scroll: [-17.0, 73.0],
                 zoom: Zoom::Percent(99.0),
+                layout: LayoutMode::Facing,
+                rotation: Rotation::Counterclockwise,
             },
             sidebar: SidebarState {
                 width: 999.0,
@@ -591,7 +593,9 @@ mod tests {
         assert_eq!(loaded.state.session.active, 1);
         let active = &loaded.state.session.files[1];
         assert_eq!(active.path, directory.path().join("active.pdf"));
-        assert_eq!(active.reading.scroll, [0.0, 73.0]);
+        assert_eq!(active.reading.scroll, [-17.0, 73.0]);
+        assert_eq!(active.reading.layout, LayoutMode::Facing);
+        assert_eq!(active.reading.rotation, Rotation::Counterclockwise);
         assert_eq!(active.reading.zoom, Zoom::FitPage);
         assert_eq!(active.sidebar.width, 400.0);
         state.restore_session = false;

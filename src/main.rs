@@ -1860,8 +1860,10 @@ mod tests {
         let first = app.tabs.active_id().unwrap();
         let location = ReadingState {
             page: 1,
-            scroll: [37.0, 193.0],
+            scroll: [-37.0, 193.0],
             zoom: zoom::Zoom::Percent(3.25),
+            layout: layout::LayoutMode::Facing,
+            rotation: layout::Rotation::Counterclockwise,
         };
         let sidebar = SidebarState {
             open: false,
@@ -1876,6 +1878,8 @@ mod tests {
             page: 0,
             scroll: [4.0, 7.0],
             zoom: zoom::Zoom::FitWidth,
+            layout: layout::LayoutMode::Continuous,
+            rotation: layout::Rotation::Clockwise,
         });
         app.open(paths[2].clone());
         app.open(paths[0].clone());
@@ -1905,8 +1909,10 @@ mod tests {
         }
         let location = ReadingState {
             page: 1,
-            scroll: [17.0, 137.0],
+            scroll: [-17.0, -137.0],
             zoom: zoom::Zoom::Percent(4.5),
+            layout: layout::LayoutMode::Facing,
+            rotation: layout::Rotation::Counterclockwise,
         };
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         app.open(first.clone());
@@ -1972,8 +1978,10 @@ mod tests {
         app.submit_password();
         let location = ReadingState {
             page: 1,
-            scroll: [19.0, 137.0],
+            scroll: [19.0, -137.0],
             zoom: zoom::Zoom::Percent(2.75),
+            layout: layout::LayoutMode::Continuous,
+            rotation: layout::Rotation::Half,
         };
         app.viewer.as_mut().unwrap().restore_reading(&location);
         app.save_state(true);

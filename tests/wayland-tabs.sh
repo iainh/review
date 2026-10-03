@@ -88,7 +88,7 @@ launch outline.pdf
 expect_title 'Review — outline.pdf — 1/2 — Fit page'
 key Right
 wtype -s 150 -M ctrl -k l -m ctrl -s 150 '600' -s 150 -k Return -s 150
-"$scratch/pointer" click 79 55
+"$scratch/pointer" click 79 99
 "$scratch/pointer" drag 240 450 327 450
 "$scratch/pointer" scroll 800 450 317
 expect_title 'Review — outline.pdf — 2/2 — 600%'
@@ -99,7 +99,7 @@ key 1
 expect_title 'Review — second résumé.pdf — 1/2 — 100%'
 command Tab
 expect_title 'Review — outline.pdf — 2/2 — 600%'
-expect_state '.sidebar.open and .sidebar.width == 327 and .recent[1].reading.scroll == [0,37.625]'
+expect_state '.sidebar.open and .sidebar.pages and .sidebar.width == 327 and .recent[1].reading.scroll == [-2,37.625]'
 capture independent-reading
 wtype -s 150 -M ctrl -M shift -k Tab -m shift -m ctrl -s 150
 expect_title 'Review — second résumé.pdf — 1/2 — 100%'
@@ -178,6 +178,30 @@ expect_state '(.session.files | length) == 15'
 echo 'PASS: over-limit session is bounded to 16, tab strip scrolls to selected document and last-tab close selects neighbour'
 quit
 
+# Restore distinct non-default layouts and rotations, then switch live views.
+jq --arg first "$scratch/outline.pdf" --arg second "$scratch/second résumé.pdf" '
+    .session = {files: [
+        {path:$first, reading:{page:0,scroll:[0,0],zoom:{Percent:1.25},
+            layout:"Facing",rotation:"Counterclockwise"},
+            sidebar:{open:false,width:240,pages:false}},
+        {path:$second, reading:{page:0,scroll:[0,0],zoom:{Percent:1.5},
+            layout:"Continuous",rotation:"Clockwise"},
+            sidebar:{open:true,width:311,pages:true}}],active:0}' "$state" > "$state.new"
+mv "$state.new" "$state"
+launch
+expect_title 'Review — outline.pdf — 1/2 — 125%'
+expect_state '.session.active == 0 and .session.files[0].reading.layout == "Facing" and .session.files[0].reading.rotation == "Counterclockwise"'
+capture restored-facing-rotation
+command Tab
+expect_title 'Review — second résumé.pdf — 1/2 — 150%'
+expect_state '.session.active == 1 and .session.files[1].reading.layout == "Continuous" and .session.files[1].reading.rotation == "Clockwise"'
+capture restored-continuous-rotation
+command Tab
+expect_title 'Review — outline.pdf — 1/2 — 125%'
+expect_state '.session.active == 0 and .session.files[0].reading.layout == "Facing" and .session.files[0].reading.rotation == "Counterclockwise"'
+echo 'PASS: per-tab facing/continuous layouts and asymmetric rotations restore and survive switching'
+quit
+
 # Edits are never stored in session metadata. Close prompts target the selected
 # document and window exit walks every dirty tab without dropping buffers early.
 REVIEW_FIXTURE_DIR="$scratch" cargo test export_annotation_fixture -- --ignored
@@ -185,10 +209,10 @@ cp "$scratch/annotations.pdf" "$scratch/second-annotations.pdf"
 edit_note() {
     local offset=$1 text=$2
     "$scratch/pointer" click 48 "$((56 + offset))"
-    "$scratch/pointer" click 1090 "$((183 + offset))"
-    "$scratch/pointer" click 1140 "$((260 + offset))"
+    "$scratch/pointer" click 1090 "$((205 + offset))"
+    "$scratch/pointer" click 1140 "$((282 + offset))"
     wtype -s 150 -M ctrl -k a -m ctrl -s 150 "$text" -s 150
-    "$scratch/pointer" click 1073 "$((333 + offset))"
+    "$scratch/pointer" click 1073 "$((355 + offset))"
 }
 launch annotations.pdf
 expect_title 'Review — annotations.pdf — 1/2 — Fit page'
