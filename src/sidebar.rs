@@ -19,6 +19,7 @@ pub enum SidebarTarget {
 pub struct Sidebar {
     pub open: bool,
     pages: bool,
+    width: f32,
     outline: Result<Vec<Outline>, String>,
     thumbnails: HashMap<usize, Result<TextureHandle, String>>,
     thumbnail_dpi: f32,
@@ -34,6 +35,7 @@ impl Sidebar {
         Self {
             open: true,
             pages: false,
+            width: 240.0,
             outline: document
                 .outlines()
                 .map_err(|error| format!("Could not load outline: {error:#}")),
@@ -41,6 +43,20 @@ impl Sidebar {
             thumbnail_dpi: 0.0,
             visible_page: None,
         }
+    }
+
+    pub fn state(&self) -> crate::persistence::SidebarState {
+        crate::persistence::SidebarState {
+            open: self.open,
+            width: self.width,
+            pages: self.pages,
+        }
+    }
+
+    pub fn restore(&mut self, state: &crate::persistence::SidebarState) {
+        self.open = state.open;
+        self.width = state.width;
+        self.pages = state.pages;
     }
 
     pub fn ui(
@@ -53,8 +69,8 @@ impl Sidebar {
             return None;
         }
         let mut destination = None;
-        egui::Panel::left("sidebar")
-            .default_size(240.0)
+        let panel = egui::Panel::left("sidebar")
+            .default_size(self.width)
             .size_range(200.0..=400.0)
             .resizable(true)
             .show_inside(root, |ui| {
@@ -83,6 +99,7 @@ impl Sidebar {
                     }
                 }
             });
+        self.width = panel.response.rect.width();
         destination
     }
 

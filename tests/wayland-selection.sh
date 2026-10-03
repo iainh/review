@@ -29,7 +29,7 @@ open_pdf() {
         sleep .1
     done
     [[ -z $(title) ]]
-    swaymsg "exec env -u DISPLAY WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$1.pdf'" >/dev/null
+    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$1.pdf'" >/dev/null
     for _ in {1..100}; do
         [[ $(title) == "Review — $1.pdf — 1/2 — Fit page" ]] && break
         sleep .1

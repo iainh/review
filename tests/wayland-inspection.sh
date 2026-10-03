@@ -20,7 +20,7 @@ original=$(sha256sum "$scratch/inspection.pdf" | cut -d' ' -f1)
 
 launch() {
     rm -f "$scratch/viewer-exit"
-    swaymsg "exec bash -c 'env -u DISPLAY WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland \"$binary\" \"$scratch/$1.pdf\"; printf \"%s\\n\" \$? > \"$scratch/viewer-exit\"'" >/dev/null
+    swaymsg "exec bash -c 'env -u DISPLAY XDG_STATE_HOME=\"$scratch/state\" WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland \"$binary\" \"$scratch/$1.pdf\"; printf \"%s\\n\" \$? > \"$scratch/viewer-exit\"'" >/dev/null
 }
 close_viewer() {
     swaymsg '[app_id="^review$"] kill' >/dev/null
@@ -114,7 +114,7 @@ echo 'PASS: explicit save produces exact bytes; cancel creates no file'
 # Expose the sidebar while leaving the main page's red rectangle visible below
 # the inspector. Pixel checks now catch stale thumbnails as well as stale pages.
 "$scratch/pointer" drag 340 33 910 33
-"$scratch/pointer" click 79 33
+"$scratch/pointer" click 79 55
 capture inspection-layers-on
 [[ $(red_pixels "$scratch/inspection-layers-on.png") -gt 0 ]]
 [[ $(red_pixels "$scratch/inspection-layers-on.png" 170x100+640+590) -gt 0 ]]

@@ -1,7 +1,7 @@
 /// PDF points are 1/72 inch; UI logical pixels follow the 96 dpi convention.
 pub const POINT_SCALE: f32 = 96.0 / 72.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Zoom {
     #[default]
     FitPage,

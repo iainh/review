@@ -1,7 +1,7 @@
 //! Window-wide appearance and shortcut help, independent of PDF rendering.
 use egui::{Color32, Context, Id, Key, Modifiers, Stroke, Theme, ThemePreference, Visuals};
 
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Appearance {
     #[default]
     System,
@@ -150,6 +150,7 @@ impl NativeUi {
                     (format!("{primary}+L"), "Select zoom percentage field"),
                     (format!("{primary}+F"), "Find in document"),
                     (format!("{primary}+D"), "Show / hide document properties"),
+                    (format!("{primary}+B"), "Add / remove personal page bookmark"),
                     ("Enter / Shift+Enter".into(), "Next / previous match in search field"),
                     ("F3 / Shift+F3".into(), "Next / previous match"),
                     ("Left / Page Up, Right / Page Down".into(), "Previous / next page¹"),

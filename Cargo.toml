@@ -7,6 +7,7 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 anyhow = "1.0"
+directories = "6"
 egui = "0.34.3"
 egui-wgpu = "0.34.3"
 egui-winit = { version = "0.34.3", default-features = false, features = ["accesskit", "clipboard", "wayland", "x11"] }
@@ -16,6 +17,9 @@ open = { version = "5.4.4", features = ["shellexecute-on-windows"] }
 pollster = "0.4"
 rfd = "0.16"
 roxmltree = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
 unicode-segmentation = "1.12"
 url = "2"
 wgpu = "29"
@@ -34,9 +38,6 @@ objc2-pdf-kit = { version = "0.3", default-features = false, features = ["std", 
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_UI_Controls_Dialogs", "Win32_System_Com"] }
-
-[dev-dependencies]
-tempfile = "3"
 
 [patch.crates-io]
 # Correct permission-bit conversion; see vendor/README.md.

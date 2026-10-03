@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 
 import pyatspi
@@ -91,9 +92,11 @@ for property_name in ["IsEnabled", "ScreenReaderEnabled"]:
 
 # A headless seat has no physical keyboard. Keep one virtual device alive;
 # otherwise destroying each wtype device correctly removes native window focus.
-with subprocess.Popen(["wtype", "-s", "120000"]) as keyboard, \
+with tempfile.TemporaryDirectory() as state_directory, \
+     subprocess.Popen(["wtype", "-s", "120000"]) as keyboard, \
      subprocess.Popen([str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve())],
-                      env={key: value for key, value in os.environ.items() if key != "DISPLAY"}) as process:
+                      env={key: value for key, value in os.environ.items() if key != "DISPLAY"}
+                      | {"XDG_STATE_HOME": state_directory}) as process:
     try:
         find("Zoom in", "push button")
         find("Zoom out", "push button")
@@ -163,10 +166,28 @@ with subprocess.Popen(["wtype", "-s", "120000"]) as keyboard, \
         find("Close help", "push button")
         capture("help-restored")
         key("Escape")
+        click("Appearance", "combo box")
+        click("High contrast", "push button")
         key("w", "ctrl")
         process.wait(timeout=10)
         assert process.returncode == 0, f"Review exited with status {process.returncode}"
-        print("PASS: all appearance choices and Ctrl+W", flush=True)
+        state = json.loads((Path(state_directory) / "review/state.json").read_text())
+        assert state["appearance"] == "HighContrast"
+        time.sleep(0.3)
+        with subprocess.Popen([str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve())],
+                              env={key: value for key, value in os.environ.items() if key != "DISPLAY"}
+                              | {"XDG_STATE_HOME": state_directory}) as restored:
+            try:
+                wait_for(lambda: page_number() == "2", "restored current page")
+                capture("appearance-restored")
+                key("w", "ctrl")
+                restored.wait(timeout=10)
+                assert restored.returncode == 0
+            finally:
+                if restored.poll() is None:
+                    restored.terminate()
+                    restored.wait(timeout=10)
+        print("PASS: all appearance choices, persisted appearance/page and clean Ctrl+W", flush=True)
     finally:
         if process.poll() is None:
             process.terminate()

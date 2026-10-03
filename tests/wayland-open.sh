@@ -12,7 +12,7 @@ cp "$scratch/outline.pdf" "$scratch/résumé 日本語 document.pdf"
 printf 'not a PDF\n' > "$scratch/broken.pdf"
 binary=$(realpath target/debug/review)
 chooser=$(realpath tests/gtk-chooser.py)
-swaymsg "exec env -u DISPLAY WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland '$binary'" >/dev/null
+swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland '$binary'" >/dev/null
 
 title() {
     swaymsg -t get_tree | jq -r '.. | objects | select(.app_id? == "review") | .name'

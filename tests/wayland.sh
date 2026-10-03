@@ -19,7 +19,7 @@ cc -Wall -Wextra -Werror -I"$scratch" tests/wayland-pointer.c "$scratch/virtual-
     $(pkg-config --cflags --libs wayland-client) -o "$scratch/pointer"
 binary=$(realpath target/debug/review)
 pdf=$(realpath "$pdf")
-swaymsg "exec env -u DISPLAY WINIT_UNIX_BACKEND=wayland '$binary' '$pdf'" >/dev/null
+swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$pdf'" >/dev/null
 
 title() {
     swaymsg -t get_tree | jq -r '.. | objects | select(.name? | strings | startswith("Review —")) | .name'
@@ -77,11 +77,11 @@ capture invalid-page
 wtype -s 150 -M ctrl -k g -m ctrl -s 150 'q' -s 150 -k Escape -s 150
 expect_page 17
 wtype -s 150 -M ctrl -k g -m ctrl -s 150 '23' -s 150
-"$scratch/pointer" click 340 12
+"$scratch/pointer" click 340 34
 expect_page 23
-"$scratch/pointer" click 165 12
+"$scratch/pointer" click 165 34
 expect_page 24
-"$scratch/pointer" click 110 12
+"$scratch/pointer" click 110 34
 expect_page 23
 key 1
 expect_zoom '100%'
@@ -150,7 +150,7 @@ echo 'PASS: Wayland search, repeat Enter, wraparound, no matches, and Escape'
 
 goto_page 1
 capture sidebar-no-outline
-"$scratch/pointer" click 79 33
+"$scratch/pointer" click 79 55
 capture sidebar-previews
 "$scratch/pointer" click 110 366
 expect_page 2
@@ -174,18 +174,24 @@ echo 'PASS: Wayland preview navigation, scrolling, resizing, and sidebar toggle'
 # The handbook has no embedded outline. Exercise hierarchy and destinations
 # with the synthetic two-page fixture instead.
 swaymsg '[title="^Review —"] kill' >/dev/null
-swaymsg "exec env -u DISPLAY WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/outline.pdf'" >/dev/null
+swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/outline.pdf'" >/dev/null
 expect_page 1 2
+# Sidebar preferences now follow the reader between documents.
+# Window titles precede first-frame presentation with background rendering.
+sleep 0.4
+"$scratch/pointer" click 30 55
+# Let the outline tab replace the thumbnail view before clicking a destination.
+sleep 0.4
 capture sidebar-nested-outline
-"$scratch/pointer" click 100 84
+"$scratch/pointer" click 100 106
 expect_page 2 2
-"$scratch/pointer" click 100 61
+"$scratch/pointer" click 100 83
 expect_page 1 2
-"$scratch/pointer" click 13 61
+"$scratch/pointer" click 13 83
 capture sidebar-outline-collapsed
-"$scratch/pointer" click 100 84
+"$scratch/pointer" click 100 106
 expect_page 1 2
-"$scratch/pointer" click 13 61
-"$scratch/pointer" click 100 84
+"$scratch/pointer" click 13 83
+"$scratch/pointer" click 100 106
 expect_page 2 2
 echo 'PASS: Wayland nested outline, collapse/expand, and destination navigation'

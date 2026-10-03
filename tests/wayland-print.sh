@@ -19,7 +19,7 @@ cc -Wall -Wextra -Werror -I"$scratch" tests/wayland-pointer.c "$scratch/pointer.
 binary=$(realpath target/debug/review)
 inspector=$(realpath tests/gtk-print-dialog.py)
 swaymsg 'for_window [title="^Print$"] floating enable' >/dev/null
-swaymsg "exec env -u DISPLAY WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland '$binary' '$scratch/outline.pdf'" >/dev/null
+swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland '$binary' '$scratch/outline.pdf'" >/dev/null
 for _ in {1..100}; do
     swaymsg -t get_tree | jq -e '.. | objects | select(.name? | strings | startswith("Review —"))' >/dev/null && break
     sleep 0.1
@@ -72,7 +72,7 @@ echo 'PASS: native print dialog cancellation returns to the same PDF; no printer
 
 for fixture in no-print low-quality; do
     swaymsg '[app_id="^review$"] kill' >/dev/null
-    swaymsg "exec env -u DISPLAY WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$fixture.pdf'" >/dev/null
+    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$fixture.pdf'" >/dev/null
     sleep 1
     wtype -s 150 -M ctrl -k p -m ctrl -s 150
     capture "print-$fixture"

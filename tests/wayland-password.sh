@@ -67,7 +67,7 @@ capture() {
     fi
 }
 launch() {
-    swaymsg "exec env -u DISPLAY WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$1'" >/dev/null
+    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$1'" >/dev/null
 }
 
 # Startup authentication, incorrect password, and Escape without a prior PDF.
@@ -133,7 +133,7 @@ key Escape
 # Every new open requires fresh credentials. Owner access removes restrictions.
 choose outline.pdf
 choose locked.pdf
-expect_title 'Review — outline.pdf — 1/2 — Fit page'
+expect_title 'Review — outline.pdf — 2/2 — 125%'
 wtype -s 150 'owner-secret' -s 150 -k Return -s 150
 expect_title 'Review — locked.pdf — 1/2 — Fit page'
 capture password-owner-access

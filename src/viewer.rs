@@ -6,6 +6,7 @@ use crate::{
     links::{self, LinkTarget, PageLink},
     navigation::{History, ViewState, destination_view},
     page_text::PageText,
+    persistence::{ReadingState, SidebarState},
     printing::PrintDialog,
     render_worker::{Priority, RenderKey, RenderWorker},
     search::Search,
@@ -16,6 +17,7 @@ use crate::{
 
 pub struct Viewer {
     document: PdfDocument,
+    state_key: std::path::PathBuf,
     zoom: Zoom,
     effective_zoom: f32,
     zoom_input: String,
@@ -43,8 +45,10 @@ impl Viewer {
     pub fn new(document: PdfDocument) -> Self {
         let sidebar = Sidebar::new(&document);
         let render_worker = RenderWorker::new(document.worker_source());
+        let state_key = crate::persistence::file_key(document.path());
         Self {
             document,
+            state_key,
             zoom: Zoom::FitPage,
             effective_zoom: 1.0,
             zoom_input: "100".into(),
@@ -108,6 +112,18 @@ impl Viewer {
         }
     }
 
+    pub fn state_key(&self) -> &std::path::Path {
+        &self.state_key
+    }
+
+    pub fn reading_state(&self) -> ReadingState {
+        ReadingState {
+            page: self.document.current_page(),
+            scroll: self.position,
+            zoom: self.zoom,
+        }
+    }
+
     fn apply_view(&mut self, view: ViewState) {
         self.document.go_to_page(view.page);
         self.zoom = view.zoom;
@@ -152,6 +168,26 @@ impl Viewer {
     pub fn save_attachment(&mut self, index: usize, path: &std::path::Path) {
         self.inspector
             .save_attachment(index, path, self.document.path());
+    }
+
+    pub fn sidebar_state(&self) -> SidebarState {
+        self.sidebar.state()
+    }
+
+    pub fn restore_sidebar(&mut self, state: &SidebarState) {
+        self.sidebar.restore(state);
+    }
+
+    pub fn restore_reading(&mut self, state: &ReadingState) {
+        // A file may have been replaced by a shorter PDF since the last visit.
+        self.apply_view(ViewState {
+            page: state.page.min(self.document.page_count() - 1),
+            position: state.scroll,
+            zoom: state.zoom,
+        });
+        if let Zoom::Percent(value) = self.zoom {
+            self.effective_zoom = value;
+        }
     }
 
     fn go_to_page(&mut self, page: usize) {
@@ -204,6 +240,7 @@ impl Viewer {
     pub fn ui(&mut self, root: &mut egui::Ui, open_requested: &mut bool) {
         self.render_worker.begin_frame();
         let ctx = root.ctx().clone();
+        let previous = (self.document.current_page(), self.zoom);
         if root.is_enabled() && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::P))
         {
             if self.document.permissions().print {
@@ -628,7 +665,6 @@ impl Viewer {
             });
             if previous != (self.document.current_page(), self.zoom) {
                 self.error = None;
-                ctx.request_repaint();
             }
         }
 
@@ -726,7 +762,7 @@ impl Viewer {
                 };
             }
             let mut scroll = egui::ScrollArea::both()
-                .id_salt("page")
+                .id_salt(("page", &self.state_key))
                 .animated(false)
                 .auto_shrink([false, false]);
             let logical_scale = scale / dpi;
@@ -835,6 +871,9 @@ impl Viewer {
         }
         if !print_active && root.is_enabled() {
             self.printing.ui(&ctx, &self.document);
+        }
+        if previous != (self.document.current_page(), self.zoom) {
+            ctx.request_repaint();
         }
     }
 }
@@ -1176,6 +1215,102 @@ mod tests {
         );
         run(&mut viewer, vec![escape()]);
         assert_eq!(viewer.document.current_page(), 0);
+    }
+
+    #[test]
+    fn restored_page_can_be_changed_with_page_entry() {
+        let mut viewer = Viewer::new(crate::document::tests::sample_document());
+        viewer.restore_reading(&crate::persistence::ReadingState {
+            page: 1,
+            zoom: crate::zoom::Zoom::Percent(6.0),
+            ..Default::default()
+        });
+        let ctx = egui::Context::default();
+        let mut library = crate::library::Library::default();
+        let mut state = crate::persistence::State::default();
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        for events in [
+            vec![],
+            vec![key(egui::Key::G, egui::Modifiers::COMMAND)],
+            vec![egui::Event::Text("1".into())],
+            vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+        ] {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    library.ui(ui, &mut state, Some(&viewer), true);
+                    viewer.ui(ui, &mut false);
+                },
+            );
+        }
+        assert_eq!(viewer.document.current_page(), 0);
+    }
+
+    #[test]
+    fn restored_scroll_is_applied_after_render_and_navigation_resets_it() {
+        use crate::{persistence::ReadingState, zoom::Zoom};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scroll.pdf");
+        std::fs::write(&path, crate::document::tests::sample_pdf("", false)).unwrap();
+        let mut viewer = Viewer::new(crate::document::PdfDocument::open(path).unwrap());
+        let location = ReadingState {
+            page: 0,
+            scroll: [37.0, 193.0],
+            zoom: Zoom::Percent(3.0),
+        };
+        viewer.restore_reading(&location);
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        // Exercise the empty asynchronous frame as well as the finished canvas.
+        let _ = ctx.run_ui(input.clone(), |ui| viewer.ui(ui, &mut false));
+        assert_eq!(viewer.reading_state(), location);
+        for _ in 0..200 {
+            let _ = ctx.run_ui(input.clone(), |ui| viewer.ui(ui, &mut false));
+            if viewer.page_texture.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(viewer.page_texture.is_some());
+        assert_eq!(viewer.reading_state(), location);
+        viewer.change_page(1);
+        let _ = ctx.run_ui(input.clone(), |ui| viewer.ui(ui, &mut false));
+        assert_eq!(viewer.reading_state().scroll, [0.0, 0.0]);
+        viewer.restore_reading(&ReadingState {
+            page: usize::MAX,
+            scroll: [1e6, 1e6],
+            zoom: Zoom::FitPage,
+        });
+        for _ in 0..200 {
+            let _ = ctx.run_ui(input.clone(), |ui| viewer.ui(ui, &mut false));
+            if viewer.page_texture.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(viewer.page_texture.is_some());
+        assert_eq!(viewer.reading_state().page, 1);
+        assert_eq!(viewer.reading_state().scroll, [0.0, 0.0]);
+        assert_eq!(viewer.page_input, "2");
     }
 
     #[test]

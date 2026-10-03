@@ -3,12 +3,14 @@
 mod document;
 mod inspection;
 mod inspector;
+mod library;
 mod links;
 #[cfg(target_os = "macos")]
 mod macos;
 mod native_ui;
 mod navigation;
 mod page_text;
+mod persistence;
 mod printing;
 mod render_worker;
 mod renderer;
@@ -38,6 +40,7 @@ struct PasswordPrompt {
     input: Zeroizing<String>,
     incorrect: bool,
     focus: bool,
+    reading: Option<persistence::ReadingState>,
 }
 
 #[derive(Debug)]
@@ -55,6 +58,9 @@ impl From<egui_winit::accesskit_winit::Event> for AppEvent {
 
 struct App {
     viewer: Option<Viewer>,
+    store: persistence::Store,
+    library: library::Library,
+    state_error: Option<String>,
     open_error: Option<String>,
     password_prompt: Option<PasswordPrompt>,
     renderer: Option<Renderer>,
@@ -66,15 +72,25 @@ struct App {
 
 impl App {
     fn new() -> Self {
+        let (store, state_error) = persistence::Store::load();
+        Self::with_state(store, state_error)
+    }
+
+    fn with_state(store: persistence::Store, state_error: Option<String>) -> Self {
+        let mut native_ui = native_ui::NativeUi::default();
+        native_ui.appearance = store.state.appearance;
         Self {
             viewer: None,
+            store,
+            library: library::Library::default(),
+            state_error,
             open_error: None,
             password_prompt: None,
             renderer: None,
             repaint_at: None,
             fatal_error: None,
             proxy: None,
-            native_ui: native_ui::NativeUi::default(),
+            native_ui,
         }
     }
 
@@ -82,15 +98,14 @@ impl App {
         self.password_prompt = None;
         self.open_error = None;
         match document::PdfDocument::open_with_password(&path, None) {
-            Ok(Some(document)) => {
-                self.viewer = Some(Viewer::new(document));
-            }
+            Ok(Some(document)) => self.finish_open(document, None),
             Ok(None) => {
                 self.password_prompt = Some(PasswordPrompt {
                     path,
                     input: Zeroizing::new(String::new()),
                     incorrect: false,
                     focus: true,
+                    reading: None,
                 })
             }
             Err(error) => self.open_error = Some(format!("{error:#}")),
@@ -107,7 +122,7 @@ impl App {
         let result = document::PdfDocument::open_with_password(&prompt.path, Some(&prompt.input));
         prompt.input.zeroize();
         match result {
-            Ok(Some(document)) => self.viewer = Some(Viewer::new(document)),
+            Ok(Some(document)) => self.finish_open(document, prompt.reading.as_ref()),
             Ok(None) => {
                 prompt.incorrect = true;
                 prompt.focus = true;
@@ -117,6 +132,77 @@ impl App {
         }
         if let Some(renderer) = &self.renderer {
             renderer.window().request_redraw();
+        }
+    }
+
+    fn finish_open(
+        &mut self,
+        document: document::PdfDocument,
+        bookmark: Option<&persistence::ReadingState>,
+    ) {
+        self.capture_state();
+        let mut viewer = Viewer::new(document);
+        viewer.restore_sidebar(&self.store.state.sidebar);
+        if let Some(reading) = bookmark.or_else(|| self.store.state.reading(viewer.state_key())) {
+            viewer.restore_reading(reading);
+        }
+        self.store
+            .state
+            .opened(viewer.state_key().to_path_buf(), viewer.reading_state());
+        self.viewer = Some(viewer);
+        self.open_error = None;
+    }
+
+    fn open_bookmark(&mut self, bookmark: persistence::Bookmark) {
+        if self
+            .viewer
+            .as_ref()
+            .is_none_or(|viewer| viewer.state_key() != bookmark.path)
+        {
+            self.open(bookmark.path.clone());
+        }
+        if let Some(prompt) = &mut self.password_prompt {
+            prompt.reading = Some(bookmark.reading);
+            return;
+        }
+        // Failed opens leave the previous viewer untouched, including its location.
+        if let Some(viewer) = &mut self.viewer
+            && viewer.state_key() == bookmark.path
+        {
+            viewer.restore_reading(&bookmark.reading);
+        }
+    }
+
+    fn capture_state(&mut self) {
+        self.store.state.appearance = self.native_ui.appearance;
+        if let Some(viewer) = &self.viewer {
+            self.store
+                .state
+                .update_reading(viewer.state_key(), viewer.reading_state());
+            self.store.state.sidebar = viewer.sidebar_state();
+        }
+        if let Some(renderer) = &self.renderer {
+            let window = renderer.window();
+            self.store.state.window.maximized = window.is_maximized();
+            if !window.is_maximized()
+                && window.fullscreen().is_none()
+                && window.is_minimized() != Some(true)
+            {
+                let size = window.inner_size().to_logical::<f64>(window.scale_factor());
+                if size.width >= 320.0 && size.height >= 320.0 {
+                    self.store.state.window.size = [size.width, size.height];
+                }
+                if let Ok(position) = window.outer_position() {
+                    self.store.state.window.position = Some([position.x, position.y]);
+                }
+            }
+        }
+    }
+
+    fn save_state(&mut self, force: bool) {
+        self.capture_state();
+        if let Err(error) = self.store.save(force) {
+            self.state_error = Some(format!("Could not save reading state: {error:#}"));
         }
     }
 }
@@ -143,10 +229,30 @@ impl ApplicationHandler<AppEvent> for App {
         if self.renderer.is_some() || self.fatal_error.is_some() {
             return;
         }
-        let attributes = Window::default_attributes()
+        let geometry = &self.store.state.window;
+        let mut attributes = Window::default_attributes()
             .with_title("Review")
             .with_visible(false)
-            .with_inner_size(winit::dpi::LogicalSize::new(960, 720));
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                geometry.size[0],
+                geometry.size[1],
+            ))
+            .with_min_inner_size(winit::dpi::LogicalSize::new(480, 320))
+            .with_maximized(geometry.maximized);
+        if let Some([x, y]) = geometry.position {
+            // Don't reopen entirely outside the desktop after a monitor is removed.
+            let visible = event_loop.available_monitors().any(|monitor| {
+                let origin = monitor.position();
+                let size = monitor.size();
+                i64::from(x) + 64 > i64::from(origin.x)
+                    && i64::from(y) + 64 > i64::from(origin.y)
+                    && i64::from(x) < i64::from(origin.x) + i64::from(size.width) - 64
+                    && i64::from(y) < i64::from(origin.y) + i64::from(size.height) - 64
+            });
+            if visible {
+                attributes = attributes.with_position(winit::dpi::PhysicalPosition::new(x, y));
+            }
+        }
         #[cfg(target_os = "linux")]
         let attributes = {
             use winit::platform::{
@@ -170,6 +276,7 @@ impl ApplicationHandler<AppEvent> for App {
         })();
         match renderer {
             Ok(renderer) => {
+                self.native_ui.appearance.apply(&renderer.context);
                 renderer.window().request_redraw();
                 self.renderer = Some(renderer);
             }
@@ -193,6 +300,7 @@ impl ApplicationHandler<AppEvent> for App {
             return;
         }
         renderer.on_event(&event);
+        let mut force_save = matches!(event, WindowEvent::CloseRequested);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => renderer.resize(size),
@@ -202,7 +310,18 @@ impl ApplicationHandler<AppEvent> for App {
                 let mut open_requested = false;
                 let mut quit = false;
                 let mut submit_password = false;
+                let mut library_action = None;
                 let mut output = renderer.context.run_ui(input, |ui| {
+                    let library_enabled = self.password_prompt.is_none()
+                        && !self.native_ui.help_open
+                        && !self.viewer.as_ref().is_some_and(Viewer::modal_open)
+                        && !ui.input(|input| input.key_pressed(Key::F1));
+                    library_action = self.library.ui(
+                        ui,
+                        &mut self.store.state,
+                        self.viewer.as_ref(),
+                        library_enabled,
+                    );
                     (open_requested, quit, submit_password) = app_ui(
                         &mut self.viewer,
                         &mut self.open_error,
@@ -210,6 +329,19 @@ impl ApplicationHandler<AppEvent> for App {
                         ui,
                         &mut self.native_ui,
                     );
+                    if let Some(error) = &self.state_error {
+                        let mut dismiss = false;
+                        egui::Window::new("Reading state").collapsible(false).show(
+                            ui.ctx(),
+                            |ui| {
+                                ui.label(error);
+                                dismiss = ui.button("Close").clicked();
+                            },
+                        );
+                        if dismiss {
+                            self.state_error = None;
+                        }
+                    }
                 });
                 let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
                 self.repaint_at = Instant::now().checked_add(delay);
@@ -232,6 +364,7 @@ impl ApplicationHandler<AppEvent> for App {
                     viewer.print_if_requested(renderer.window());
                 }
                 if quit {
+                    force_save = true;
                     event_loop.exit();
                 } else if submit_password {
                     self.submit_password();
@@ -266,13 +399,34 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     renderer.window().request_redraw();
                 }
+                match library_action {
+                    Some(library::Action::Open(path)) => self.open(path),
+                    Some(library::Action::Bookmark(bookmark)) => {
+                        self.open_bookmark(bookmark);
+                        if let Some(renderer) = &self.renderer {
+                            renderer.window().request_redraw();
+                        }
+                    }
+                    Some(library::Action::ClearHistory) => {
+                        self.store.state.clear_history();
+                        force_save = true;
+                    }
+                    None => {}
+                }
             }
             _ => {}
         }
+        self.save_state(force_save);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(deadline) = self.repaint_at {
+        self.save_state(false);
+        let deadline = self
+            .repaint_at
+            .into_iter()
+            .chain(self.store.save_deadline())
+            .min();
+        if let Some(deadline) = deadline {
             if deadline <= Instant::now() {
                 if let Some(renderer) = &self.renderer {
                     renderer.window().request_redraw();
@@ -288,6 +442,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.save_state(true);
         // Drop/join egui's clipboard worker before winit destroys the display.
         self.renderer = None;
     }
@@ -522,7 +677,7 @@ mod tests {
             mupdf::pdf::Permission::ACCESSIBILITY,
             mupdf::pdf::Encryption::Aes256,
         );
-        let mut app = App::new();
+        let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
         app.viewer = Some(Viewer::new(document::tests::sample_document()));
         let ctx = egui::Context::default();
         password_frame(
@@ -587,12 +742,14 @@ mod tests {
 
     #[test]
     fn password_is_masked_and_cancel_keeps_empty_window_open() {
-        let mut app = App::new();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
         app.password_prompt = Some(PasswordPrompt {
             path: "locked.pdf".into(),
             input: Zeroizing::new("sensitive-text".into()),
             incorrect: false,
             focus: true,
+            reading: None,
         });
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
@@ -649,7 +806,7 @@ mod tests {
             mupdf::pdf::Permission::ACCESSIBILITY,
             mupdf::pdf::Encryption::Aes256,
         );
-        let mut app = App::new();
+        let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
         app.viewer = Some(Viewer::new(document::tests::sample_document()));
         app.open(path.clone());
         app.password_prompt
@@ -900,7 +1057,8 @@ mod tests {
 
     #[test]
     fn failed_open_preserves_document_and_error_is_dismissible() {
-        let mut app = App::new();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
         app.viewer = Some(Viewer::new(document::tests::sample_document()));
         app.open("/missing/review-no-such-file.pdf".into());
         assert!(
@@ -941,7 +1099,8 @@ mod tests {
 
     #[test]
     fn successful_open_replaces_document_and_resets_view() {
-        let mut app = App::new();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
         app.viewer = Some(Viewer::new(document::tests::sample_document()));
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -969,7 +1128,6 @@ mod tests {
             );
         });
         assert!(app.viewer.as_ref().unwrap().title().ends_with("2/2 — 125%"));
-        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("new document.pdf");
         std::fs::write(&path, document::tests::sample_pdf("", false)).unwrap();
         app.open_error = Some("previous error".into());
@@ -979,6 +1137,168 @@ mod tests {
             "Review — new document.pdf — 1/2 — Fit page"
         );
         assert!(app.open_error.is_none());
+    }
+
+    #[test]
+    fn app_restart_replacement_bookmarks_and_clear_history() {
+        use persistence::{Bookmark, ReadingState, SidebarState, Store};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("first.pdf");
+        let second = directory.path().join("second.pdf");
+        for path in [&path, &second] {
+            std::fs::write(path, document::tests::sample_pdf("", false)).unwrap();
+        }
+        let location = ReadingState {
+            page: 1,
+            scroll: [73.0, 129.0],
+            zoom: zoom::Zoom::Percent(2.75),
+        };
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        app.open(path.clone());
+        app.viewer.as_mut().unwrap().restore_reading(&location);
+        app.viewer.as_mut().unwrap().restore_sidebar(&SidebarState {
+            open: false,
+            width: 317.0,
+            pages: true,
+        });
+        app.store
+            .state
+            .toggle_bookmark(persistence::file_key(&path), location.clone());
+        app.open(second.clone());
+        assert_eq!(
+            app.store.state.reading(&persistence::file_key(&path)),
+            Some(&location)
+        );
+        app.save_state(true);
+        drop(app);
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        assert!(app.viewer.is_none()); // No automatic document reopen.
+        app.open(path.clone());
+        assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
+        assert_eq!(
+            app.viewer.as_ref().unwrap().sidebar_state(),
+            SidebarState {
+                open: false,
+                width: 317.0,
+                pages: true
+            }
+        );
+        app.open(second);
+        app.open_bookmark(app.store.state.bookmarks[0].clone());
+        assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
+        app.open_bookmark(Bookmark {
+            path: directory.path().join("missing.pdf"),
+            reading: ReadingState::default(),
+        });
+        assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
+        assert_eq!(app.store.state.recent.len(), 2);
+        app.store.state.clear_history();
+        app.save_state(true);
+        assert!(app.store.state.recent.is_empty());
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        app.open(path);
+        assert_eq!(
+            app.viewer.as_ref().unwrap().reading_state(),
+            ReadingState::default()
+        );
+        assert_eq!(app.store.state.bookmarks.len(), 1);
+    }
+
+    #[test]
+    fn encrypted_recent_and_bookmark_restore_only_after_authentication() {
+        use persistence::{ReadingState, Store};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("locked.pdf");
+        document::tests::encrypted_fixture(
+            &path,
+            "open-secret",
+            mupdf::pdf::Permission::ACCESSIBILITY,
+            mupdf::pdf::Encryption::Aes256,
+        );
+        let plain = directory.path().join("plain.pdf");
+        std::fs::write(&plain, document::tests::sample_pdf("", false)).unwrap();
+        let recent = ReadingState {
+            page: 1,
+            scroll: [49.0, 213.0],
+            zoom: zoom::Zoom::Percent(3.75),
+        };
+        let bookmark = ReadingState {
+            page: 0,
+            scroll: [17.0, 87.0],
+            zoom: zoom::Zoom::Percent(2.25),
+        };
+        let mut store = Store::temporary(directory.path());
+        store
+            .state
+            .opened(persistence::file_key(&path), recent.clone());
+        store
+            .state
+            .toggle_bookmark(persistence::file_key(&path), bookmark.clone());
+        store.save(true).unwrap();
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        app.open(plain.clone());
+        let preserved = app.store.state.clone();
+        app.open(path.clone()); // The recent-file route always opens without credentials.
+        assert!(app.password_prompt.is_some());
+        assert_eq!(app.store.state, preserved);
+        assert_eq!(
+            app.viewer.as_ref().unwrap().reading_state(),
+            ReadingState::default()
+        );
+        app.password_prompt
+            .as_mut()
+            .unwrap()
+            .input
+            .push_str("wrong-secret");
+        app.submit_password();
+        assert_eq!(app.store.state, preserved);
+        let ctx = egui::Context::default();
+        password_frame(
+            &mut app,
+            &ctx,
+            vec![key_event(Key::Escape, Modifiers::NONE)],
+        );
+        assert!(app.password_prompt.is_none());
+        assert_eq!(app.store.state, preserved);
+        app.open(path.clone());
+        app.password_prompt
+            .as_mut()
+            .unwrap()
+            .input
+            .push_str("open-secret");
+        app.submit_password();
+        assert_eq!(app.viewer.as_ref().unwrap().reading_state(), recent);
+        app.open(plain);
+        app.open_bookmark(app.store.state.bookmarks[0].clone());
+        assert!(app.password_prompt.is_some());
+        assert_eq!(
+            app.viewer.as_ref().unwrap().reading_state(),
+            ReadingState::default()
+        );
+        app.password_prompt
+            .as_mut()
+            .unwrap()
+            .input
+            .push_str("wrong-secret");
+        app.submit_password();
+        assert!(app.password_prompt.as_ref().unwrap().incorrect);
+        app.password_prompt
+            .as_mut()
+            .unwrap()
+            .input
+            .push_str("open-secret");
+        app.submit_password();
+        assert_eq!(app.viewer.as_ref().unwrap().reading_state(), bookmark);
+        app.save_state(true);
+        let json = std::fs::read_to_string(directory.path().join("state.json")).unwrap();
+        assert!(!json.contains("open-secret"));
+        assert!(!json.contains("wrong-secret"));
+        assert!(!json.contains("password"));
+        drop(app);
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        app.open(path);
+        assert!(app.password_prompt.is_some());
+        assert!(app.viewer.is_none());
     }
 
     #[test]

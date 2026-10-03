@@ -16,8 +16,9 @@ cargo run --release -- document.pdf
 Launch without a path to open an empty window. Use **Open** or **Ctrl+O**
 (**Cmd+O** on macOS) to choose a PDF in the native file dialog, or drop a PDF
 onto the window. Opening another PDF replaces the current document and resets
-navigation, zoom, search and previews. Cancelling the dialog or failing to open
-a file leaves the current PDF unchanged; errors appear in the window.
+search and previews. Previously visited files restore their page, scroll position
+and zoom. Cancelling the dialog or failing to open a file leaves the current PDF
+unchanged; errors appear in the window.
 
 Password-protected PDFs open through a masked password prompt. Press **Enter**
 or **Open PDF** to unlock; an incorrect password clears the field for retry.
@@ -135,7 +136,7 @@ System follows the light/dark theme reported by the OS, falling back to egui's
 dark theme when unavailable. High contrast is an explicit black-and-white UI
 with yellow focus/selection borders; winit does not report OS high-contrast mode.
 These choices affect controls, not PDF page colours, and last for the window's
-lifetime, including when opening another document. Preferences are not saved.
+lifetime, including when opening another document, and are saved between sessions.
 
 Review connects egui's AccessKit tree to the native winit accessibility adapter
 (Windows UI Automation, macOS accessibility and Linux AT-SPI). Controls expose
@@ -186,6 +187,40 @@ digests, certificate chains, revocation, timestamps or post-signing changes;
 the safe binding exposes no cryptographic verifier. Claimed signer names and
 dates are unverified. Document timestamps outside the AcroForm tree are not
 enumerated. Document JavaScript and file-launch actions remain disabled.
+
+## Reading state and privacy
+
+Review remembers page, scroll position and zoom mode/percentage for the 32 most
+recently opened files. Sidebar visibility, width and selected tab, and normal
+window size, position, maximized state and appearance persist between sessions. Window
+placement is restored only where the window system allows it; Wayland leaves
+placement to the compositor. Review does not automatically reopen a document
+when launched without a path.
+
+Use **Recent files** to reopen a document. **Personal bookmarks** saves a page,
+zoom and scroll position without modifying the PDF. Use **Ctrl+B** (**Cmd+B** on
+macOS) to add or remove the current page bookmark, or use the menu. Select a saved
+location to navigate; **×** removes it. Up to 512 personal bookmarks are kept,
+independently of the PDF's embedded outline. Reopening an encrypted document
+still prompts for its password before restoring a saved location.
+
+**Recent files → Clear history…** removes recent files and saved reading
+positions after confirmation. It keeps personal bookmarks and sidebar/window
+preferences. Remove personal bookmarks separately in their menu. Clearing
+history does not close the current PDF or silently add it back to history;
+opening it again starts a new history entry.
+
+Only paths and view metadata are saved, never PDF passwords, extracted text,
+search terms or rendered page contents. Writes atomically replace `state.json`,
+with ordinary interaction writes throttled to twice per second. Clearing history
+and normal exit flush immediately.
+Missing state uses defaults; corrupt or unsupported state shows a warning and
+uses defaults. Storage is private to the current user:
+
+- Linux: `$XDG_STATE_HOME/review/state.json`, defaulting to
+  `~/.local/state/review/state.json`.
+- macOS: `~/Library/Application Support/org.spiralpoint.Review/state.json`.
+- Windows: `%LOCALAPPDATA%\spiralpoint\Review\data\state.json`.
 
 ## Downloads
 
@@ -323,6 +358,12 @@ Create the fixture directory first. Pass an optional third argument to save
 screenshots. The test must share Sway's D-Bus session, for example through
 `swaymsg exec`, so the adapter and AT-SPI client share the accessibility bus.
 
+`bash tests/wayland-persistence.sh` checks restart/restore, scroll and sidebar
+preferences, recent files, personal bookmarks, history clearing, encrypted
+reopening, normal window size and corrupt-state recovery with disposable state
+directories. It uses the same native Sway session and pointer tooling as the
+test below, but does not need a file chooser.
+
 `bash tests/wayland.sh` exercises native keyboard and pointer input under Sway
 using the OpenID Connect handbook. It requires `swaymsg`, `wtype`, `grim`,
 `jq`, `curl`, a C compiler, `pkg-config`, and Wayland development headers and
@@ -352,8 +393,8 @@ page pixels with ImageMagick (`magick` is required in addition to the Wayland
 tools above). It never activates external links; Rust tests inspect egui's URL
 and clipboard requests without dispatching them to external applications.
 
-This is a foundation, not a complete viewer. Annotations, tabs and persistent
-preferences are not implemented yet.
+This is a foundation, not a complete viewer. Annotations and tabs are not
+implemented yet.
 
 ## CI and releases
 
