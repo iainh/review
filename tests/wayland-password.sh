@@ -130,7 +130,9 @@ expect_title 'Review — locked.pdf — 1/2 — Fit page'
 capture password-restricted-search
 key Escape
 
-# Every new open requires fresh credentials. Owner access removes restrictions.
+# Closing the tab drops credentials; reopening prompts again. Focusing an
+# existing unlocked tab does not reopen it. Owner access removes restrictions.
+wtype -s 150 -M ctrl -k w -m ctrl -s 150
 choose outline.pdf
 choose locked.pdf
 expect_title 'Review — outline.pdf — 2/2 — 125%'

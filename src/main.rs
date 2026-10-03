@@ -23,6 +23,7 @@ mod search;
 mod selection;
 mod sidebar;
 mod structured_text;
+mod tabs;
 mod viewer;
 mod zoom;
 
@@ -75,6 +76,8 @@ enum UnsavedDecision {
 
 struct App {
     viewer: Option<Viewer>,
+    tabs: tabs::Tabs,
+    session_cleared: bool,
     store: persistence::Store,
     library: library::Library,
     state_error: Option<String>,
@@ -100,6 +103,8 @@ impl App {
         native_ui.appearance = store.state.appearance;
         Self {
             viewer: None,
+            tabs: tabs::Tabs::default(),
+            session_cleared: false,
             store,
             library: library::Library::default(),
             state_error,
@@ -134,6 +139,23 @@ impl App {
     fn open_unchecked(&mut self, path: PathBuf, reading: Option<persistence::ReadingState>) {
         self.password_prompt = None;
         self.open_error = None;
+        let key = persistence::file_key(&path);
+        if let Some(id) = self.tabs.find(&key)
+            && self.tabs.select(id, &mut self.viewer)
+        {
+            self.session_cleared = false;
+            let viewer = self.viewer.as_ref().unwrap();
+            self.store.state.opened(key, viewer.reading_state());
+            self.tab_changed();
+            return;
+        }
+        if self.tabs.find(&key).is_none() && self.tabs.len() >= persistence::MAX_SESSION {
+            self.open_error = Some(
+                "The 16-document limit is reached. Close a tab before opening another PDF.".into(),
+            );
+            self.tab_changed();
+            return;
+        }
         match document::PdfDocument::open_with_password(&path, None) {
             Ok(Some(document)) => self.finish_open(document, reading.as_ref()),
             Ok(None) => {
@@ -217,15 +239,61 @@ impl App {
     ) {
         self.capture_state();
         let mut viewer = Viewer::new(document);
-        viewer.restore_sidebar(&self.store.state.sidebar);
-        if let Some(reading) = bookmark.or_else(|| self.store.state.reading(viewer.state_key())) {
+        let restored = self
+            .tabs
+            .find(viewer.state_key())
+            .and_then(|id| self.tabs.file(id));
+        viewer.restore_sidebar(restored.map_or(&self.store.state.sidebar, |file| &file.sidebar));
+        if let Some(reading) = bookmark
+            .or_else(|| restored.map(|file| &file.reading))
+            .or_else(|| self.store.state.reading(viewer.state_key()))
+        {
             viewer.restore_reading(reading);
         }
         self.store
             .state
             .opened(viewer.state_key().to_path_buf(), viewer.reading_state());
-        self.viewer = Some(viewer);
+        self.tabs.opened(viewer, &mut self.viewer);
+        self.session_cleared = false;
+        self.tab_changed();
         self.open_error = None;
+    }
+
+    fn tab_changed(&self) {
+        if let Some(renderer) = &self.renderer {
+            renderer.context.memory_mut(|memory| {
+                if let Some(id) = memory.focused() {
+                    memory.surrender_focus(id);
+                }
+            });
+            renderer.window().request_redraw();
+        }
+    }
+
+    fn select_tab(&mut self, id: u64) {
+        if self.tabs.select(id, &mut self.viewer) {
+            self.open_error = None;
+            self.tab_changed();
+        } else if let Some(file) = self.tabs.file(id) {
+            self.open(file.path.clone());
+        }
+    }
+
+    fn close_tab(&mut self, id: u64) {
+        self.capture_state();
+        if let Some(neighbour) = self.tabs.close(id, &mut self.viewer) {
+            self.select_tab(neighbour);
+        }
+        self.tab_changed();
+    }
+
+    fn restore_session(&mut self) {
+        if self.store.state.restore_session {
+            self.tabs.restore(&self.store.state.session);
+            if let Some(id) = self.tabs.active_id() {
+                self.select_tab(id);
+            }
+        }
     }
 
     fn open_bookmark(&mut self, bookmark: persistence::Bookmark) {
@@ -254,6 +322,18 @@ impl App {
 
     fn capture_state(&mut self) {
         self.store.state.appearance = self.native_ui.appearance;
+        self.tabs.capture(self.viewer.as_ref());
+        let session = self.tabs.session();
+        for file in &session.files {
+            self.store
+                .state
+                .update_reading(&file.path, file.reading.clone());
+        }
+        if self.store.state.restore_session && !self.session_cleared {
+            self.store.state.session = session;
+        } else {
+            self.store.state.session = persistence::Session::default();
+        }
         if let Some(viewer) = &self.viewer {
             self.store
                 .state
@@ -390,6 +470,7 @@ impl ApplicationHandler<AppEvent> for App {
                 let mut quit = false;
                 let mut submit_password = false;
                 let mut library_action = None;
+                let mut tab_action = None;
                 let unsaved_active = self.pending.is_some();
                 let mut unsaved_decision = None;
                 let mut output = renderer.context.run_ui(input, |ui| {
@@ -411,13 +492,17 @@ impl ApplicationHandler<AppEvent> for App {
                             self.viewer.as_ref(),
                             library_enabled,
                         );
-                        (open_requested, quit, submit_password) = app_ui(
-                            &mut self.viewer,
-                            &mut self.open_error,
-                            &mut self.password_prompt,
-                            ui,
-                            &mut self.native_ui,
-                        );
+                        tab_action = self.tabs.ui(ui, library_enabled, self.viewer.is_some());
+                        let id = self.tabs.active_id().unwrap_or(0);
+                        ui.push_id(("document", id), |ui| {
+                            (open_requested, quit, submit_password) = app_ui(
+                                &mut self.viewer,
+                                &mut self.open_error,
+                                &mut self.password_prompt,
+                                ui,
+                                &mut self.native_ui,
+                            );
+                        });
                         if let Some(error) = &self.state_error {
                             let mut dismiss = false;
                             egui::Window::new("Reading state").collapsible(false).show(
@@ -516,8 +601,19 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     Some(library::Action::ClearHistory) => {
                         self.store.state.clear_history();
+                        self.session_cleared = true;
                         force_save = true;
                     }
+                    Some(library::Action::RestoreSession(enabled)) => {
+                        self.store.state.restore_session = enabled;
+                        self.session_cleared = false;
+                        force_save = true;
+                    }
+                    None => {}
+                }
+                match tab_action {
+                    Some(tabs::Action::Select(id)) => self.select_tab(id),
+                    Some(tabs::Action::Close(id)) => self.close_tab(id),
                     None => {}
                 }
             }
@@ -628,10 +724,8 @@ fn app_ui(
     }
     let modal_input =
         password_active.then(|| ctx.input_mut(|input| std::mem::take(&mut input.events)));
-    let quit = ctx.input_mut(|input| {
-        input.consume_key(Modifiers::COMMAND, Key::Q)
-            || input.consume_key(Modifiers::COMMAND, Key::W)
-    });
+    // Ctrl/Cmd+W belongs to the tab strip, not the window-level quit command.
+    let quit = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::Q));
     let blocked = native_ui.begin(root) || password_active;
     let mut open_requested = !blocked
         && !viewer.as_ref().is_some_and(Viewer::modal_open)
@@ -769,6 +863,8 @@ fn main() -> Result<()> {
     app.proxy = Some(event_loop.create_proxy());
     if let Some(path) = path {
         app.open(path);
+    } else {
+        app.restore_session();
     }
     let event_result = event_loop.run_app(&mut app);
     if let Some(error) = app.fatal_error {
@@ -1174,12 +1270,14 @@ mod tests {
                 (false, false)
             );
         }
-        for key_code in [Key::Q, Key::W] {
-            assert_eq!(
-                frame(&mut app, &ctx, vec![key(key_code, Modifiers::COMMAND)]).0,
-                (false, true)
-            );
-        }
+        assert_eq!(
+            frame(&mut app, &ctx, vec![key(Key::Q, Modifiers::COMMAND)]).0,
+            (false, true)
+        );
+        assert_eq!(
+            frame(&mut app, &ctx, vec![key(Key::W, Modifiers::COMMAND)]).0,
+            (false, false)
+        );
     }
 
     #[test]
@@ -1572,6 +1670,9 @@ mod tests {
             .push_str("open-secret");
         app.submit_password();
         assert_eq!(app.viewer.as_ref().unwrap().reading_state(), recent);
+        // Closing drops its session-only credentials. Focusing an already-open
+        // unlocked tab does not reopen/authenticate the same document.
+        app.close_tab(app.tabs.active_id().unwrap());
         app.open(plain);
         let plain_reading = app.viewer.as_ref().unwrap().reading_state();
         app.open_bookmark(app.store.state.bookmarks[0].clone());
@@ -1601,6 +1702,205 @@ mod tests {
         app.open(path);
         assert!(app.password_prompt.is_some());
         assert!(app.viewer.is_none());
+    }
+
+    #[test]
+    fn tabs_keep_independent_views_deduplicate_and_close_by_identity() {
+        use persistence::{ReadingState, SidebarState, Store};
+        let directory = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = ["first.pdf", "second.pdf", "third.pdf"]
+            .map(|name| {
+                let path = directory.path().join(name);
+                std::fs::write(&path, document::tests::sample_pdf("", false)).unwrap();
+                path
+            })
+            .into();
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        app.open(paths[0].clone());
+        let first = app.tabs.active_id().unwrap();
+        let location = ReadingState {
+            page: 1,
+            scroll: [37.0, 193.0],
+            zoom: zoom::Zoom::Percent(3.25),
+        };
+        let sidebar = SidebarState {
+            open: false,
+            width: 311.0,
+            pages: true,
+        };
+        app.viewer.as_mut().unwrap().restore_reading(&location);
+        app.viewer.as_mut().unwrap().restore_sidebar(&sidebar);
+        app.open(paths[1].clone());
+        let second = app.tabs.active_id().unwrap();
+        app.viewer.as_mut().unwrap().restore_reading(&ReadingState {
+            page: 0,
+            scroll: [4.0, 7.0],
+            zoom: zoom::Zoom::FitWidth,
+        });
+        app.open(paths[2].clone());
+        app.open(paths[0].clone());
+        assert_eq!(app.tabs.len(), 3);
+        assert_eq!(app.tabs.active_id(), Some(first));
+        assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
+        assert_eq!(app.viewer.as_ref().unwrap().sidebar_state(), sidebar);
+        app.close_tab(second); // Inactive close must not change the selected Viewer.
+        assert_eq!(app.tabs.active_id(), Some(first));
+        assert_eq!(app.tabs.len(), 2);
+        app.close_tab(first);
+        assert_eq!(app.viewer.as_ref().unwrap().path(), paths[2]);
+        app.close_tab(app.tabs.active_id().unwrap());
+        assert!(app.viewer.is_none());
+        assert_eq!(app.tabs.len(), 0);
+        assert!(app.store.state.reading(&paths[0]).is_some());
+    }
+
+    #[test]
+    fn session_is_opt_in_restores_active_and_lazy_tabs_and_clears_explicitly() {
+        use persistence::{ReadingState, Store};
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.pdf");
+        let second = directory.path().join("second.pdf");
+        for path in [&first, &second] {
+            std::fs::write(path, document::tests::sample_pdf("", false)).unwrap();
+        }
+        let location = ReadingState {
+            page: 1,
+            scroll: [17.0, 137.0],
+            zoom: zoom::Zoom::Percent(4.5),
+        };
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        app.open(first.clone());
+        app.viewer.as_mut().unwrap().restore_reading(&location);
+        app.open(second.clone());
+        app.save_state(true);
+        assert!(app.store.state.session.files.is_empty());
+        app.store.state.restore_session = true;
+        app.select_tab(app.tabs.find(&first).unwrap());
+        app.save_state(true);
+        drop(app);
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        app.restore_session();
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
+        assert_eq!(app.viewer.as_ref().unwrap().path(), first);
+        // The inactive restored file has not been opened. Losing it must not
+        // destroy the active view or drop its recoverable tab metadata.
+        std::fs::remove_file(&second).unwrap();
+        let second_id = app.tabs.find(&second).unwrap();
+        app.select_tab(second_id);
+        assert!(app.open_error.is_some());
+        assert_eq!(app.viewer.as_ref().unwrap().path(), first);
+        app.close_tab(second_id);
+        assert_eq!(app.tabs.len(), 1);
+        app.store.state.clear_history();
+        app.session_cleared = true;
+        app.save_state(true);
+        assert!(app.store.state.session.files.is_empty());
+        assert!(app.store.state.recent.is_empty());
+        let mut restart = App::with_state(Store::temporary(directory.path()), None);
+        restart.restore_session();
+        assert!(restart.viewer.is_none());
+        assert_eq!(restart.tabs.len(), 0);
+        app.store.state.restore_session = false;
+        app.open(first);
+        app.save_state(true);
+        assert!(app.store.state.session.files.is_empty());
+    }
+
+    #[test]
+    fn restored_encrypted_tab_authenticates_without_disturbing_selected_document() {
+        use persistence::{ReadingState, Store};
+        let directory = tempfile::tempdir().unwrap();
+        let plain = directory.path().join("plain.pdf");
+        let locked = directory.path().join("locked.pdf");
+        std::fs::write(&plain, document::tests::sample_pdf("", false)).unwrap();
+        document::tests::encrypted_fixture(
+            &locked,
+            "session-secret",
+            mupdf::pdf::Permission::ACCESSIBILITY,
+            mupdf::pdf::Encryption::Aes256,
+        );
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        app.store.state.restore_session = true;
+        app.open(plain.clone());
+        app.open(locked.clone());
+        app.password_prompt
+            .as_mut()
+            .unwrap()
+            .input
+            .push_str("session-secret");
+        app.submit_password();
+        let location = ReadingState {
+            page: 1,
+            scroll: [19.0, 137.0],
+            zoom: zoom::Zoom::Percent(2.75),
+        };
+        app.viewer.as_mut().unwrap().restore_reading(&location);
+        app.save_state(true);
+        drop(app);
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        app.restore_session();
+        assert!(app.password_prompt.is_some());
+        assert!(app.viewer.is_none());
+        let preserved = app.store.state.clone();
+        app.password_prompt
+            .as_mut()
+            .unwrap()
+            .input
+            .push_str("wrong-secret");
+        app.submit_password();
+        assert_eq!(app.store.state, preserved);
+        password_frame(
+            &mut app,
+            &egui::Context::default(),
+            vec![key_event(Key::Escape, Modifiers::NONE)],
+        );
+        app.select_tab(app.tabs.find(&plain).unwrap());
+        let selected = app.tabs.active_id();
+        app.select_tab(app.tabs.find(&locked).unwrap());
+        assert_eq!(app.tabs.active_id(), selected);
+        assert_eq!(app.viewer.as_ref().unwrap().path(), plain);
+        app.password_prompt
+            .as_mut()
+            .unwrap()
+            .input
+            .push_str("session-secret");
+        app.submit_password();
+        assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
+        let count = app.tabs.len();
+        app.open(plain);
+        app.open(locked); // Existing unlocked tab is focused, not reopened.
+        assert!(app.password_prompt.is_none());
+        assert_eq!(app.tabs.len(), count);
+        app.save_state(true);
+        let json = std::fs::read_to_string(directory.path().join("state.json")).unwrap();
+        for forbidden in ["session-secret", "wrong-secret", "password", "Chapter one"] {
+            assert!(!json.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn tab_limit_rejects_new_files_but_allows_focusing_existing_tabs() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
+        for index in 0..=persistence::MAX_SESSION {
+            let path = directory.path().join(format!("{index}.pdf"));
+            std::fs::write(&path, document::tests::sample_pdf("", false)).unwrap();
+            app.open(path);
+        }
+        assert_eq!(app.tabs.len(), 16);
+        assert!(app.open_error.as_ref().unwrap().contains("limit"));
+        assert_eq!(
+            app.viewer.as_ref().unwrap().path(),
+            directory.path().join("15.pdf")
+        );
+        app.open(directory.path().join("0.pdf"));
+        assert!(app.open_error.is_none());
+        assert_eq!(app.tabs.len(), 16);
+        assert_eq!(
+            app.viewer.as_ref().unwrap().path(),
+            directory.path().join("0.pdf")
+        );
     }
 
     #[test]

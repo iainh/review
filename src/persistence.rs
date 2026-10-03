@@ -17,6 +17,7 @@ use crate::{
 
 pub const MAX_RECENT: usize = 32;
 pub const MAX_BOOKMARKS: usize = 512;
+pub const MAX_SESSION: usize = 16;
 const MAX_STATE_BYTES: u64 = 2 * 1024 * 1024;
 const SAVE_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -99,6 +100,22 @@ pub struct Bookmark {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionFile {
+    #[serde(with = "native_path")]
+    pub path: PathBuf,
+    pub reading: ReadingState,
+    #[serde(default)]
+    pub sidebar: SidebarState,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Session {
+    pub files: Vec<SessionFile>,
+    pub active: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
     version: u32,
@@ -107,6 +124,8 @@ pub struct State {
     pub window: WindowState,
     pub recent: Vec<RecentFile>,
     pub bookmarks: Vec<Bookmark>,
+    pub restore_session: bool,
+    pub session: Session,
 }
 
 impl Default for State {
@@ -118,12 +137,37 @@ impl Default for State {
             window: WindowState::default(),
             recent: Vec::new(),
             bookmarks: Vec::new(),
+            restore_session: false,
+            session: Session::default(),
         }
     }
 }
 
 impl State {
     fn sanitize(&mut self) {
+        if !self.restore_session {
+            self.session = Session::default();
+        }
+        self.session.files.truncate(MAX_SESSION);
+        let active_path = self
+            .session
+            .files
+            .get(self.session.active)
+            .map(|file| file.path.clone());
+        let mut session_paths = std::collections::HashSet::new();
+        self.session
+            .files
+            .retain(|file| file.path.is_absolute() && session_paths.insert(file.path.clone()));
+        self.session.active = active_path
+            .and_then(|path| self.session.files.iter().position(|file| file.path == path))
+            .unwrap_or(0);
+        for file in &mut self.session.files {
+            file.reading.sanitize();
+            if !file.sidebar.width.is_finite() {
+                file.sidebar.width = 240.0;
+            }
+            file.sidebar.width = file.sidebar.width.clamp(200.0, 400.0);
+        }
         self.recent.truncate(MAX_RECENT);
         self.bookmarks.truncate(MAX_BOOKMARKS);
         let mut paths = std::collections::HashSet::new();
@@ -176,6 +220,7 @@ impl State {
 
     pub fn clear_history(&mut self) {
         self.recent.clear();
+        self.session = Session::default();
     }
 
     pub fn toggle_bookmark(&mut self, path: PathBuf, reading: ReadingState) {
@@ -502,6 +547,62 @@ mod tests {
         assert_eq!(store.state.window.size, [960.0, 720.0]);
         assert_eq!(store.state.recent[0].reading.scroll, [-3.0, 87.0]);
         assert_eq!(store.state.recent[0].reading.zoom, Zoom::FitPage);
+    }
+
+    #[test]
+    fn session_load_is_bounded_deduplicated_sanitized_and_backward_compatible() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        fs::write(&path, r#"{"version":1}"#).unwrap();
+        let legacy = Store::temporary(directory.path());
+        assert!(!legacy.state.restore_session);
+        assert!(legacy.state.session.files.is_empty());
+        let file = |name: &str| SessionFile {
+            path: directory.path().join(name),
+            reading: ReadingState {
+                page: 1,
+                scroll: [-17.0, 73.0],
+                zoom: Zoom::Percent(99.0),
+            },
+            sidebar: SidebarState {
+                width: 999.0,
+                ..Default::default()
+            },
+        };
+        let mut state = State {
+            restore_session: true,
+            ..Default::default()
+        };
+        let mut relative = file("ignored.pdf");
+        relative.path = "relative.pdf".into();
+        state.session.files = vec![
+            relative,
+            file("first.pdf"),
+            file("first.pdf"),
+            file("active.pdf"),
+        ];
+        state.session.active = 3;
+        for index in 0..MAX_SESSION + 8 {
+            state.session.files.push(file(&format!("{index}.pdf")));
+        }
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let loaded = Store::temporary(directory.path());
+        assert_eq!(loaded.state.session.files.len(), 14);
+        assert_eq!(loaded.state.session.active, 1);
+        let active = &loaded.state.session.files[1];
+        assert_eq!(active.path, directory.path().join("active.pdf"));
+        assert_eq!(active.reading.scroll, [0.0, 73.0]);
+        assert_eq!(active.reading.zoom, Zoom::FitPage);
+        assert_eq!(active.sidebar.width, 400.0);
+        state.restore_session = false;
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(
+            Store::temporary(directory.path())
+                .state
+                .session
+                .files
+                .is_empty()
+        );
     }
 
     #[test]

@@ -168,7 +168,7 @@ with tempfile.TemporaryDirectory() as state_directory, \
         key("Escape")
         click("Appearance", "combo box")
         click("High contrast", "push button")
-        key("w", "ctrl")
+        key("q", "ctrl")
         process.wait(timeout=10)
         assert process.returncode == 0, f"Review exited with status {process.returncode}"
         state = json.loads((Path(state_directory) / "review/state.json").read_text())
@@ -181,13 +181,16 @@ with tempfile.TemporaryDirectory() as state_directory, \
                 wait_for(lambda: page_number() == "2", "restored current page")
                 capture("appearance-restored")
                 key("w", "ctrl")
+                wait_for(lambda: named("Open…", "push button"), "empty window after closing last tab")
+                assert restored.poll() is None
+                key("q", "ctrl")
                 restored.wait(timeout=10)
                 assert restored.returncode == 0
             finally:
                 if restored.poll() is None:
                     restored.terminate()
                     restored.wait(timeout=10)
-        print("PASS: all appearance choices, persisted appearance/page and clean Ctrl+W", flush=True)
+        print("PASS: all appearance choices, persisted appearance/page, document close and clean Ctrl+Q", flush=True)
     finally:
         if process.poll() is None:
             process.terminate()

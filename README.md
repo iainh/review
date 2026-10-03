@@ -15,10 +15,11 @@ cargo run --release -- document.pdf
 
 Launch without a path to open an empty window. Use **Open** or **Ctrl+O**
 (**Cmd+O** on macOS) to choose a PDF in the native file dialog, or drop a PDF
-onto the window. Opening another PDF replaces the current document and resets
-search and previews. Previously visited files restore their page, scroll
-position, zoom, layout and rotation. Cancelling the dialog or failing to open
-a file leaves the current PDF unchanged; errors appear in the window.
+onto the window. Opening another PDF adds a tab; opening an already-open path
+focuses its tab. Each document keeps its page, zoom, scroll, layout, rotation,
+sidebar, search, selection and navigation history. Previously visited files
+restore their saved reading state. Cancelling the dialog or failing to open a
+file leaves the current PDF unchanged; errors appear in the window.
 
 Password-protected PDFs open through a masked password prompt. Press **Enter**
 or **Open PDF** to unlock; an incorrect password clears the field for retry.
@@ -33,13 +34,16 @@ remain available even when copying is prohibited. Owner-password access grants
 full permissions; PDFs with an empty user password open without prompting.
 
 `review --help` prints usage without opening a window. Use `review -- -draft.pdf`
-for a filename that starts with a dash. Review displays one PDF at a time.
+for a filename that starts with a dash. Review supports up to 16 open documents.
+The tab strip appears when multiple documents are open. Click a tab to select
+it, or use **Ctrl+Tab**/**Ctrl+Shift+Tab** to cycle in either direction. **×** or
+**Ctrl+W** (**Cmd+W** on macOS) closes the current document; closing the last tab
+leaves an empty window. **Ctrl+Q** (**Cmd+Q** on macOS) closes the window.
 
 Use **Left**/**Page Up** and **Right**/**Page Down** to change pages, **+** and
 **-** to zoom, **0** to fit the page, **1** for 100%, **2** to fit the width,
 and **Home**/**End** for the first/last page when no control has focus. Click
-the page background to release focus. **Ctrl+Q**/**Ctrl+W** (**Cmd+Q**/**Cmd+W**
-on macOS) closes the window; **Escape** dismisses UI and never quits. Zoomed pages
+the page background to release focus. **Escape** dismisses UI and never quits. Zoomed pages
 can be scrolled horizontally and vertically. Use **Ctrl+L** (**Cmd+L** on macOS) to
 enter a zoom from 10 to 1600%; **Enter** applies it and **Escape** cancels.
 Percentage zoom is independent of window size: 100% uses 96 logical pixels
@@ -321,8 +325,17 @@ Review remembers page, scroll position, zoom mode/percentage, layout and rotatio
 for the 32 most recently opened files. Sidebar visibility, width and selected
 tab, and normal window size, position, maximized state and appearance persist
 between sessions. Window placement is restored only where the window system
-allows it; Wayland leaves placement to the compositor. Review does not
-automatically reopen a document when launched without a path.
+allows it; Wayland leaves placement to the compositor. Session restoration is
+off by default.
+
+Enable **Recent files → Restore tabs on startup** to remember up to 16 document
+paths, individual reading/sidebar states, tab order and the selected tab. A
+launch without a path restores that session; an explicit path starts a new
+session. Restored documents open on selection, so missing or encrypted files
+do not prevent other tabs from opening. Encrypted documents always need fresh
+authentication after restart. A cancelled password prompt keeps the previous
+tab selected; select the unopened tab again to retry. Disabling restoration
+removes the saved session immediately. Unsaved PDF contents are never included.
 
 Use **Recent files** to reopen a document. **Personal bookmarks** saves a page,
 zoom, scroll position, layout and rotation without modifying the PDF. Use
@@ -332,8 +345,8 @@ personal bookmarks are kept, independently of the PDF's embedded outline.
 Reopening an encrypted document still prompts for its password before restoring
 a saved location.
 
-**Recent files → Clear history…** removes recent files and saved reading
-positions after confirmation. It keeps personal bookmarks and sidebar/window
+**Recent files → Clear history…** removes recent files, saved reading
+positions and the saved tab session after confirmation. It keeps personal bookmarks and sidebar/window
 preferences. Remove personal bookmarks separately in their menu. Clearing
 history does not close the current PDF or silently add it back to history;
 opening it again starts a new history entry.
@@ -467,6 +480,9 @@ session described below. It requires a GTK file-chooser portal or Zenity and
 `bash tests/wayland-password.sh` uses the same session and chooser workflow to
 check masked password entry, retry, keyboard and button cancellation, preserved
 navigation, owner access and permission notices with synthetic encrypted PDFs.
+`bash tests/wayland-tabs.sh` checks independent reading/sidebar states, duplicate
+focus, tab switching/closing, opt-in restart and encrypted lazy restoration
+with disposable state. It uses the same native Sway and chooser workflow.
 `bash tests/wayland-inspection.sh` checks label navigation, inspector tabs,
 rendered layer toggles and explicit attachment saving/cancellation using a
 synthetic PDF. It additionally requires ImageMagick for pixel checks.
@@ -570,7 +586,7 @@ encryption. It also clicks and edits a field on rotated facing page 2, checks
 cross-page radio state and document undo/redo, and verifies those saved values.
 Set `REVIEW_SCREENSHOTS` to capture representative form and unsaved-close states.
 
-This is a foundation, not a complete viewer. Tabs are not implemented yet.
+This is a foundation, not a complete viewer.
 
 ## CI and releases
 

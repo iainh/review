@@ -10,6 +10,7 @@ pub enum Action {
     Open(PathBuf),
     Bookmark(Bookmark),
     ClearHistory,
+    RestoreSession(bool),
 }
 
 #[derive(Default)]
@@ -63,13 +64,19 @@ impl Library {
                     ui.separator();
                     if ui
                         .add_enabled(
-                            !state.recent.is_empty(),
+                            !state.recent.is_empty() || !state.session.files.is_empty(),
                             egui::Button::new("Clear history…"),
                         )
                         .clicked()
                     {
                         self.confirm_clear = true;
                         ui.close();
+                    }
+                    ui.separator();
+                    let mut restore = state.restore_session;
+                    if ui.checkbox(&mut restore, "Restore tabs on startup")
+                        .on_hover_text("Opt-in: remember up to 16 document paths and reading locations. Encrypted PDFs still need their passwords.").changed() {
+                        action = Some(Action::RestoreSession(restore));
                     }
                 });
                 ui.menu_button("Personal bookmarks", |ui| {
@@ -150,7 +157,7 @@ impl Library {
                 .collapsible(false)
                 .resizable(false)
                 .show(&ctx, |ui| {
-                    ui.label("Remove recent files and their saved reading positions.");
+                    ui.label("Remove reading history and the saved tab session.");
                     ui.label("Personal bookmarks and window/sidebar preferences are kept.");
                     ui.horizontal(|ui| {
                         if ui.button("Clear history").clicked() {
