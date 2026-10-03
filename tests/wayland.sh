@@ -150,9 +150,9 @@ echo 'PASS: Wayland search, repeat Enter, wraparound, no matches, and Escape'
 
 goto_page 1
 capture sidebar-no-outline
-"$scratch/pointer" click 79 55
+"$scratch/pointer" click 79 77
 capture sidebar-previews
-"$scratch/pointer" click 110 366
+"$scratch/pointer" click 110 388
 expect_page 2
 goto_page 45
 expect_page 45
@@ -160,7 +160,7 @@ capture sidebar-last-page
 goto_page 1
 "$scratch/pointer" scroll 110 400 700
 capture sidebar-scrolled
-"$scratch/pointer" click 110 366
+"$scratch/pointer" click 110 388
 # 700px scroll + the second visible row targets page 5, not page 2.
 expect_page 5
 "$scratch/pointer" drag 240 450 340 450
@@ -179,19 +179,19 @@ expect_page 1 2
 # Sidebar preferences now follow the reader between documents.
 # Window titles precede first-frame presentation with background rendering.
 sleep 0.4
-"$scratch/pointer" click 30 55
+"$scratch/pointer" click 30 77
 # Let the outline tab replace the thumbnail view before clicking a destination.
 sleep 0.4
 capture sidebar-nested-outline
-"$scratch/pointer" click 100 106
+"$scratch/pointer" click 100 128
 expect_page 2 2
-"$scratch/pointer" click 100 83
+"$scratch/pointer" click 100 105
 expect_page 1 2
-"$scratch/pointer" click 13 83
+"$scratch/pointer" click 13 105
 capture sidebar-outline-collapsed
-"$scratch/pointer" click 100 106
+"$scratch/pointer" click 100 128
 expect_page 1 2
-"$scratch/pointer" click 13 83
-"$scratch/pointer" click 100 106
+"$scratch/pointer" click 13 105
+"$scratch/pointer" click 100 128
 expect_page 2 2
 echo 'PASS: Wayland nested outline, collapse/expand, and destination navigation'
