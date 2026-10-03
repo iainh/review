@@ -806,21 +806,15 @@ mod tests {
         assert!(app.pending.is_none());
         assert!(app.viewer.as_ref().unwrap().is_dirty());
         app.open(replacement.clone());
-        let mut permissions = std::fs::metadata(&source).unwrap().permissions();
+        let original_permissions = std::fs::metadata(&source).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
         permissions.set_readonly(true);
-        std::fs::set_permissions(&source, permissions.clone()).unwrap();
+        std::fs::set_permissions(&source, permissions).unwrap();
         assert!(!app.resolve_unsaved(UnsavedDecision::Save(false)));
         assert!(app.pending.is_some());
         assert!(app.viewer.as_ref().unwrap().is_dirty());
         assert_eq!(app.viewer.as_ref().unwrap().path(), source);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            permissions.set_mode(0o600);
-        }
-        #[cfg(windows)]
-        permissions.set_readonly(false);
-        std::fs::set_permissions(&source, permissions).unwrap();
+        std::fs::set_permissions(&source, original_permissions).unwrap();
         assert!(!app.resolve_unsaved(UnsavedDecision::Save(false)));
         assert_eq!(app.viewer.as_ref().unwrap().path(), replacement);
         assert_eq!(
