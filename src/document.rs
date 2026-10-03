@@ -294,6 +294,16 @@ impl PdfDocument {
             .context("failed to read PDF outline")
     }
 
+    pub fn links(&self, page_number: usize) -> Result<Vec<crate::links::PageLink>> {
+        ensure!(page_number < self.page_count, "page is out of range");
+        crate::links::extract(&self.document, page_number)
+    }
+
+    pub fn page_bounds(&self, page_number: usize) -> Result<mupdf::Rect> {
+        ensure!(page_number < self.page_count, "page is out of range");
+        Ok(self.document.load_page(page_number as i32)?.bounds()?)
+    }
+
     pub fn page_size(&self, page_number: usize) -> Result<(f32, f32)> {
         ensure!(page_number < self.page_count, "page is out of range");
         let bounds = self.document.load_page(page_number as i32)?.bounds()?;

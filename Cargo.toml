@@ -11,10 +11,13 @@ egui = "0.34.3"
 egui-wgpu = "0.34.3"
 egui-winit = { version = "0.34.3", default-features = false, features = ["accesskit", "clipboard", "wayland", "x11"] }
 mupdf = { version = "0.8", default-features = false, features = ["base14-fonts", "system-fonts"] }
+# Use native scheme handlers, including mailto, without URL shell interpolation.
+open = { version = "5.4.4", features = ["shellexecute-on-windows"] }
 pollster = "0.4"
 rfd = "0.16"
 roxmltree = "0.21"
 unicode-segmentation = "1.12"
+url = "2"
 wgpu = "29"
 winit = "0.30"
 zeroize = "1"

@@ -11,6 +11,11 @@ use crate::{
 
 const PREVIEW_HEIGHT: f32 = 210.0;
 
+pub enum SidebarTarget {
+    Page(usize),
+    Destination(mupdf::link::LinkDestination),
+}
+
 pub struct Sidebar {
     pub open: bool,
     pages: bool,
@@ -39,7 +44,7 @@ impl Sidebar {
         root: &mut egui::Ui,
         document: &PdfDocument,
         worker: &mut RenderWorker,
-    ) -> Option<usize> {
+    ) -> Option<SidebarTarget> {
         if !self.open {
             return None;
         }
@@ -55,7 +60,9 @@ impl Sidebar {
                 });
                 ui.separator();
                 if self.pages {
-                    destination = self.page_previews(ui, document, worker);
+                    destination = self
+                        .page_previews(ui, document, worker)
+                        .map(SidebarTarget::Page);
                 } else {
                     match &self.outline {
                         Ok(outline) if outline.is_empty() => {
@@ -212,7 +219,7 @@ fn outline_rows(
     entries: &[Outline],
     current: usize,
     count: usize,
-    destination: &mut Option<usize>,
+    destination: &mut Option<SidebarTarget>,
 ) {
     for (index, entry) in entries.iter().enumerate() {
         ui.push_id(index, |ui| {
@@ -232,7 +239,7 @@ fn outline_rows(
                     )
                     .clicked()
                 {
-                    *destination = page;
+                    *destination = entry.dest.map(SidebarTarget::Destination);
                 }
             };
             if entry.down.is_empty() {

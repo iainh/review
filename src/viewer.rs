@@ -2,12 +2,14 @@ use egui::{Color32, Context, Key, Modifiers, TextureHandle, Vec2};
 
 use crate::{
     document::PdfDocument,
+    links::{self, LinkTarget, PageLink},
+    navigation::{History, ViewState, destination_view},
     page_text::PageText,
     printing::PrintDialog,
     render_worker::{Priority, RenderKey, RenderWorker},
     search::Search,
     selection::Selection,
-    sidebar::Sidebar,
+    sidebar::{Sidebar, SidebarTarget},
     zoom::{POINT_SCALE, Zoom},
 };
 
@@ -27,6 +29,12 @@ pub struct Viewer {
     printing: PrintDialog,
     selection: Selection,
     page_text: PageText,
+    history: History,
+    position: [f32; 2],
+    restore_position: bool,
+    viewport: [f32; 2],
+    links: Vec<PageLink>,
+    links_page: Option<usize>,
 }
 
 impl Viewer {
@@ -49,6 +57,12 @@ impl Viewer {
             printing: PrintDialog::default(),
             selection: Selection::default(),
             page_text: PageText::default(),
+            history: History::default(),
+            position: [0.0; 2],
+            restore_position: false,
+            viewport: [960.0, 720.0],
+            links: Vec::new(),
+            links_page: None,
         }
     }
 
@@ -74,15 +88,78 @@ impl Viewer {
         self.printing.open
     }
 
+    fn view_state(&self) -> ViewState {
+        ViewState {
+            page: self.document.current_page(),
+            position: self.position,
+            zoom: self.zoom,
+        }
+    }
+
+    fn apply_view(&mut self, view: ViewState) {
+        self.document.go_to_page(view.page);
+        self.zoom = view.zoom;
+        self.position = view.position;
+        self.restore_position = true;
+        self.reveal_match = false;
+        self.page_input = (view.page + 1).to_string();
+        self.error = None;
+    }
+
+    fn visit(&mut self, view: ViewState) {
+        self.history.visit(self.view_state(), view);
+        self.apply_view(view);
+    }
+
+    fn go_to_destination(&mut self, destination: mupdf::link::LinkDestination) {
+        let page = destination.loc.page_number as usize;
+        match self.document.page_bounds(page) {
+            Ok(bounds) => self.visit(destination_view(
+                self.view_state(),
+                page,
+                destination.kind,
+                bounds,
+                self.viewport,
+            )),
+            Err(error) => self.error = Some(format!("Cannot follow destination: {error:#}")),
+        }
+    }
+
+    fn navigate_history(&mut self, backwards: bool) {
+        let current = self.view_state();
+        let view = if backwards {
+            self.history.back(current)
+        } else {
+            self.history.forward(current)
+        };
+        if let Some(view) = view {
+            self.apply_view(view);
+        }
+    }
+
     fn go_to_page(&mut self, page: usize) {
-        self.document.go_to_page(page);
+        if page < self.document.page_count() && page != self.document.current_page() {
+            self.visit(ViewState {
+                page,
+                position: [0.0; 2],
+                ..self.view_state()
+            });
+        }
         self.page_input = (self.document.current_page() + 1).to_string();
         self.error = None;
     }
 
     fn change_page(&mut self, delta: i32) {
-        self.document.change_page(delta);
-        self.go_to_page(self.document.current_page());
+        let current = self.view_state();
+        if self.document.change_page(delta) {
+            let next = ViewState {
+                page: self.document.current_page(),
+                position: [0.0; 2],
+                ..current
+            };
+            self.history.visit(current, next);
+            self.apply_view(next);
+        }
     }
 
     fn submit_page(&mut self) {
@@ -132,6 +209,13 @@ impl Viewer {
         let print_input =
             print_active.then(|| ctx.input_mut(|input| std::mem::take(&mut input.events)));
         let shortcuts = root.is_enabled() && !print_active;
+        if shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::ALT, Key::ArrowLeft)) {
+            self.navigate_history(true);
+        } else if shortcuts
+            && ctx.input_mut(|input| input.consume_key(Modifiers::ALT, Key::ArrowRight))
+        {
+            self.navigate_history(false);
+        }
         let mut focus_page =
             shortcuts && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::G));
         let mut focus_zoom =
@@ -367,6 +451,21 @@ impl Viewer {
                 {
                     self.page_text.toggle(&ctx);
                 }
+                ui.separator();
+                if ui
+                    .add_enabled(self.history.can_back(), egui::Button::new("Back"))
+                    .on_hover_text("Alt+Left")
+                    .clicked()
+                {
+                    self.navigate_history(true);
+                }
+                if ui
+                    .add_enabled(self.history.can_forward(), egui::Button::new("Forward"))
+                    .on_hover_text("Alt+Right")
+                    .clicked()
+                {
+                    self.navigate_history(false);
+                }
             });
             let permissions = self.document.permissions();
             if !permissions.print || !permissions.print_high_quality || !permissions.copy {
@@ -504,17 +603,21 @@ impl Viewer {
             }
         }
 
-        if let Some(page) = self
+        if let Some(target) = self
             .sidebar
             .ui(root, &self.document, &mut self.render_worker)
         {
-            self.go_to_page(page);
+            match target {
+                SidebarTarget::Page(page) => self.go_to_page(page),
+                SidebarTarget::Destination(destination) => self.go_to_destination(destination),
+            }
             ctx.request_repaint();
         }
         self.page_text.ui(root, &self.document);
 
         egui::CentralPanel::default().show_inside(root, |ui| {
             let available = ui.available_size();
+            self.viewport = [available.x, available.y];
             let dpi = ctx.pixels_per_point();
             let viewport = ((available.x * dpi) as u32, (available.y * dpi) as u32);
             let size = match self.document.page_size(self.document.current_page()) {
@@ -583,72 +686,108 @@ impl Viewer {
                     }
                 }
             }
-            egui::ScrollArea::both()
-                .id_salt(("page", self.document.current_page()))
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if let Some(texture) = &self.page_texture {
-                        let previous_scale = self.rendered.map_or(scale, RenderKey::scale);
-                        let size = texture.size_vec2() / dpi * (scale / previous_scale);
-                        let canvas = available.max(size + Vec2::splat(32.0));
-                        let (rect, _) = ui.allocate_exact_size(canvas, egui::Sense::hover());
-                        let page = egui::Rect::from_center_size(rect.center(), size);
-                        ui.painter().image(
-                            texture.id(),
-                            page,
-                            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                        for (index, hit) in self
-                            .search
-                            .matches
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, hit)| hit.page == self.document.current_page())
-                        {
-                            let selected = self.search.selected == Some(index);
-                            let mut bounds = egui::Rect::NOTHING;
-                            for quad in &hit.quads {
-                                let points: Vec<_> = quad
-                                    .iter()
-                                    .map(|point| {
-                                        page.min + Vec2::new(point[0] * size.x, point[1] * size.y)
-                                    })
-                                    .collect();
-                                for point in &points {
-                                    bounds.extend_with(*point);
-                                }
-                                let colour = if selected {
-                                    Color32::from_rgba_unmultiplied(255, 145, 0, 110)
-                                } else {
-                                    Color32::from_rgba_unmultiplied(255, 225, 0, 75)
-                                };
-                                ui.painter().add(egui::Shape::convex_polygon(
-                                    points,
-                                    colour,
-                                    egui::Stroke::NONE,
-                                ));
-                            }
-                            if selected && self.reveal_match {
-                                ui.scroll_to_rect(bounds.expand(24.0), None);
-                                self.reveal_match = false;
-                            }
-                        }
-                        if let Err(error) = self.selection.ui(
-                            ui,
-                            &self.document,
-                            page,
-                            self.document.permissions().copy,
-                        ) {
-                            self.error = Some(format!("Failed to read page text: {error:#}"));
-                        }
-                    } else if pending {
-                        ui.vertical_centered(|ui| {
-                            ui.spinner();
-                            ui.label("Rendering page…");
-                        });
+            if self.links_page != Some(self.document.current_page()) {
+                self.links_page = Some(self.document.current_page());
+                self.links = match self.document.links(self.document.current_page()) {
+                    Ok(links) => links,
+                    Err(error) => {
+                        self.error = Some(format!("Cannot load page links: {error:#}"));
+                        Vec::new()
                     }
-                });
+                };
+            }
+            let mut scroll = egui::ScrollArea::both()
+                .id_salt("page")
+                .animated(false)
+                .auto_shrink([false, false]);
+            let logical_scale = scale / dpi;
+            let mut page_origin = Vec2::ZERO;
+            if let Some(texture) = &self.page_texture {
+                let previous_scale = self.rendered.map_or(scale, RenderKey::scale);
+                let size = texture.size_vec2() / dpi * (scale / previous_scale);
+                page_origin = (available.max(size + Vec2::splat(32.0)) - size) * 0.5;
+                if self.restore_position {
+                    let offset = page_origin + Vec2::from(self.position) * logical_scale;
+                    scroll = scroll.scroll_offset(offset);
+                    self.restore_position = false;
+                }
+            }
+            let mut activated = None;
+            let output = scroll.show(ui, |ui| {
+                if let Some(texture) = &self.page_texture {
+                    let previous_scale = self.rendered.map_or(scale, RenderKey::scale);
+                    let size = texture.size_vec2() / dpi * (scale / previous_scale);
+                    let canvas = available.max(size + Vec2::splat(32.0));
+                    let (rect, _) = ui.allocate_exact_size(canvas, egui::Sense::hover());
+                    let page = egui::Rect::from_center_size(rect.center(), size);
+                    ui.painter().image(
+                        texture.id(),
+                        page,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    for (index, hit) in self
+                        .search
+                        .matches
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, hit)| hit.page == self.document.current_page())
+                    {
+                        let selected = self.search.selected == Some(index);
+                        let mut bounds = egui::Rect::NOTHING;
+                        for quad in &hit.quads {
+                            let points: Vec<_> = quad
+                                .iter()
+                                .map(|point| {
+                                    page.min + Vec2::new(point[0] * size.x, point[1] * size.y)
+                                })
+                                .collect();
+                            for point in &points {
+                                bounds.extend_with(*point);
+                            }
+                            let colour = if selected {
+                                Color32::from_rgba_unmultiplied(255, 145, 0, 110)
+                            } else {
+                                Color32::from_rgba_unmultiplied(255, 225, 0, 75)
+                            };
+                            ui.painter().add(egui::Shape::convex_polygon(
+                                points,
+                                colour,
+                                egui::Stroke::NONE,
+                            ));
+                        }
+                        if selected && self.reveal_match {
+                            ui.scroll_to_rect(bounds.expand(24.0), None);
+                            self.reveal_match = false;
+                        }
+                    }
+                    if let Err(error) = self.selection.ui(
+                        ui,
+                        &self.document,
+                        page,
+                        self.document.permissions().copy,
+                    ) {
+                        self.error = Some(format!("Failed to read page text: {error:#}"));
+                    }
+                    activated = links::ui(ui, &self.links, page);
+                } else if pending {
+                    ui.vertical_centered(|ui| {
+                        ui.spinner();
+                        ui.label("Rendering page…");
+                    });
+                }
+            });
+            if self.page_texture.is_some() {
+                let position = (output.state.offset - page_origin).max(Vec2::ZERO) / logical_scale;
+                self.position = [position.x, position.y];
+            }
+            if let Some(target) = activated {
+                match target {
+                    LinkTarget::Internal(destination) => self.go_to_destination(destination),
+                    LinkTarget::External(url) => ctx.open_url(egui::OpenUrl::new_tab(url.as_str())),
+                }
+                ctx.request_repaint();
+            }
         });
         self.render_worker.end_frame(&ctx);
         if let Some(events) = print_input {
@@ -688,6 +827,190 @@ fn select_text(ctx: &Context, response: &egui::Response, len: usize) {
 #[cfg(test)]
 mod tests {
     use super::{Viewer, parse_page};
+
+    fn frame(
+        viewer: &mut Viewer,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                max_texture_side: Some(8192),
+                events,
+                ..Default::default()
+            },
+            |ui| viewer.ui(ui, &mut false),
+        )
+    }
+
+    fn links_viewer() -> (tempfile::TempDir, Viewer) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("links.pdf");
+        std::fs::write(&path, crate::links::tests::fixture()).unwrap();
+        let mut viewer = Viewer::new(crate::document::PdfDocument::open(path).unwrap());
+        viewer.sidebar.open = false;
+        (directory, viewer)
+    }
+
+    fn settled_frame(viewer: &mut Viewer, ctx: &egui::Context) -> egui::FullOutput {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let output = frame(viewer, ctx, vec![]);
+            let ready = viewer.rendered.is_some_and(|key| {
+                key.page == viewer.document.current_page()
+                    && (key.scale() / (crate::zoom::POINT_SCALE * ctx.pixels_per_point())
+                        - viewer.effective_zoom)
+                        .abs()
+                        < 0.0001
+            }) && viewer.page_texture.is_some()
+                && !viewer.restore_position;
+            if ready {
+                return output;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "render did not settle: {:?}",
+                viewer.error
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn destination_and_history_restore_rendered_scroll_position_and_zoom() {
+        let (_directory, mut viewer) = links_viewer();
+        let ctx = egui::Context::default();
+        viewer.zoom = crate::zoom::Zoom::Percent(3.0);
+        viewer.position = [33.0, 77.0];
+        viewer.restore_position = true;
+        settled_frame(&mut viewer, &ctx);
+        let original = viewer.view_state();
+        assert_eq!(original.position, [33.0, 77.0]);
+        let crate::links::LinkTarget::Internal(dest) = viewer.links[0].target else {
+            panic!("expected destination")
+        };
+        viewer.go_to_destination(dest);
+        settled_frame(&mut viewer, &ctx);
+        let target = viewer.view_state();
+        assert_eq!(target.page, 1);
+        assert_eq!(target.zoom, crate::zoom::Zoom::Percent(2.25));
+        assert_eq!(target.position, [70.0, 300.0]);
+        // Event modifiers must not accidentally also trigger previous/next page.
+        let key = |key| egui::Event::Key {
+            key,
+            modifiers: egui::Modifiers::ALT,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+        };
+        viewer.printing.open = true;
+        frame(&mut viewer, &ctx, vec![key(egui::Key::ArrowLeft)]);
+        assert_eq!(viewer.view_state(), target);
+        viewer.printing.open = false;
+        frame(&mut viewer, &ctx, vec![key(egui::Key::ArrowLeft)]);
+        settled_frame(&mut viewer, &ctx);
+        assert_eq!(viewer.view_state(), original);
+        frame(&mut viewer, &ctx, vec![key(egui::Key::ArrowRight)]);
+        settled_frame(&mut viewer, &ctx);
+        assert_eq!(viewer.view_state(), target);
+        viewer.navigate_history(true);
+        viewer.go_to_page(1);
+        assert!(!viewer.history.can_forward());
+    }
+
+    #[test]
+    fn link_hover_click_and_copy_do_not_open_external_urls_without_a_primary_click() {
+        let (_directory, mut viewer) = links_viewer();
+        let ctx = egui::Context::default();
+        let output = settled_frame(&mut viewer, &ctx);
+        let texture = viewer.page_texture.as_ref().unwrap().id();
+        let page = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Mesh(mesh) if mesh.texture_id == texture => Some(mesh.calc_bounds()),
+                _ => None,
+            })
+            .unwrap();
+        let point = viewer.links[2].screen_bounds(page).center();
+        let output = frame(&mut viewer, &ctx, vec![egui::Event::PointerMoved(point)]);
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand
+        );
+        assert!(output.platform_output.commands.is_empty());
+        let pointer = |pos, button, pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(
+            &mut viewer,
+            &ctx,
+            vec![pointer(point, egui::PointerButton::Secondary, true)],
+        );
+        frame(
+            &mut viewer,
+            &ctx,
+            vec![pointer(point, egui::PointerButton::Secondary, false)],
+        );
+        // Popups use an invisible sizing pass on their first frame.
+        let output = frame(&mut viewer, &ctx, vec![]);
+        let copy = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Copy Link" => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(output.platform_output.commands.is_empty());
+        frame(
+            &mut viewer,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(copy),
+                pointer(copy, egui::PointerButton::Primary, true),
+            ],
+        );
+        let output = frame(
+            &mut viewer,
+            &ctx,
+            vec![pointer(copy, egui::PointerButton::Primary, false)],
+        );
+        assert!(output.platform_output.commands.iter().any(|command| matches!(command, egui::OutputCommand::CopyText(text) if text == "https://example.org/paper.pdf#page=3")));
+        assert!(
+            !output
+                .platform_output
+                .commands
+                .iter()
+                .any(|command| matches!(command, egui::OutputCommand::OpenUrl(_)))
+        );
+        frame(
+            &mut viewer,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(point),
+                pointer(point, egui::PointerButton::Primary, true),
+            ],
+        );
+        let output = frame(
+            &mut viewer,
+            &ctx,
+            vec![pointer(point, egui::PointerButton::Primary, false)],
+        );
+        assert!(output.platform_output.commands.iter().any(|command| matches!(command, egui::OutputCommand::OpenUrl(url) if url.url == "https://example.org/paper.pdf#page=3")));
+        // Platform output is inspected, never dispatched to a browser in tests.
+        assert_eq!(viewer.document.current_page(), 0);
+        assert!(!viewer.history.can_back());
+    }
 
     #[test]
     fn viewer_enforces_copy_permission_without_blocking_reusable_extraction() {

@@ -153,6 +153,7 @@ impl NativeUi {
                     ("F3 / Shift+F3".into(), "Next / previous match"),
                     ("Left / Page Up, Right / Page Down".into(), "Previous / next page¹"),
                     ("Home / End".into(), "First / last page¹"),
+                    ("Alt+Left / Alt+Right".into(), "Back / forward in navigation history"),
                     (format!("{primary}++ / {primary}+- / {primary}+0"), "Zoom in / out / fit page"),
                     ("+ / - / 0".into(), "Zoom in / out / fit page¹"),
                     ("1 / 2".into(), "Actual size (100%) / fit width¹"),

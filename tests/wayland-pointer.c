@@ -44,8 +44,9 @@ static void settle(struct wl_display *display) {
 int main(int argc, char **argv) {
     if (argc < 4 || (strcmp(argv[1], "click") && strcmp(argv[1], "double") &&
         strcmp(argv[1], "triple") && strcmp(argv[1], "right") &&
+        strcmp(argv[1], "right-click") && strcmp(argv[1], "move") &&
         strcmp(argv[1], "drag") && strcmp(argv[1], "scroll"))) {
-        fprintf(stderr, "usage: pointer click|double|triple|right x y | drag x y x2 y2 | scroll x y delta\n");
+        fprintf(stderr, "usage: pointer click|double|triple|right|right-click x y | move x y [hold-ms] | drag x y x2 y2 | scroll x y delta\n");
         return 1;
     }
     struct wl_display *display = wl_display_connect(NULL);
@@ -109,8 +110,9 @@ int main(int argc, char **argv) {
             zwlr_virtual_pointer_v1_button(pointer, now(), BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED);
             zwlr_virtual_pointer_v1_frame(pointer);
         }
-    } else {
-        zwlr_virtual_pointer_v1_button(pointer, now(), BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED);
+    } else if (strcmp(argv[1], "move")) {
+        uint32_t button = !strcmp(argv[1], "right-click") ? BTN_RIGHT : BTN_LEFT;
+        zwlr_virtual_pointer_v1_button(pointer, now(), button, WL_POINTER_BUTTON_STATE_PRESSED);
         zwlr_virtual_pointer_v1_frame(pointer);
         settle(display);
         if (!strcmp(argv[1], "drag") && argc == 6) {
@@ -118,10 +120,14 @@ int main(int argc, char **argv) {
             zwlr_virtual_pointer_v1_frame(pointer);
             settle(display);
         }
-        zwlr_virtual_pointer_v1_button(pointer, now(), BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED);
+        zwlr_virtual_pointer_v1_button(pointer, now(), button, WL_POINTER_BUTTON_STATE_RELEASED);
         zwlr_virtual_pointer_v1_frame(pointer);
     }
     settle(display);
+    // Keep the virtual pointer alive while a hover tooltip is captured.
+    if (!strcmp(argv[1], "move") && argc == 5) {
+        usleep((useconds_t)atoi(argv[4]) * 1000);
+    }
     zwlr_virtual_pointer_v1_destroy(pointer);
     zwlr_virtual_pointer_manager_v1_destroy(manager);
     wl_registry_destroy(registry);

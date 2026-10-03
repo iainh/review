@@ -1,9 +1,11 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod document;
+mod links;
 #[cfg(target_os = "macos")]
 mod macos;
 mod native_ui;
+mod navigation;
 mod page_text;
 mod printing;
 mod render_worker;

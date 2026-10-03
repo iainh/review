@@ -144,7 +144,21 @@ impl Renderer {
         self.window.request_redraw();
     }
 
-    pub fn render(&mut self, output: egui::FullOutput) -> Result<()> {
+    pub fn render(&mut self, mut output: egui::FullOutput) -> Result<()> {
+        output.platform_output.commands.retain(|command| {
+            if let egui::OutputCommand::OpenUrl(request) = command {
+                // Revalidate at the native boundary. The opener uses OS scheme
+                // handlers; PDF strings are arguments/data, never shell code.
+                if let Some(url) = crate::links::SafeUrl::parse(&request.url)
+                    && let Err(error) = open::that_detached(url.as_str())
+                {
+                    eprintln!("failed to open link: {error}");
+                }
+                false
+            } else {
+                true
+            }
+        });
         self.input
             .handle_platform_output(&self.window, output.platform_output);
         // Upload deltas even when the surface is temporarily unavailable. egui

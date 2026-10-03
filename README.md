@@ -72,6 +72,21 @@ without bookmarks show “This document has no outline.” The current preview i
 highlighted and follows page changes. Drag the sidebar edge to resize it; use
 **F9** or **Sidebar** to hide or show it.
 
+Click a PDF link to follow an internal or named destination, including its
+position and zoom. Outline entries use the same destination settings. Hover a
+link to highlight it and see its destination; right-click a web or email link
+for **Copy Link**. Only validated `http`, `https` and `mailto` URI actions can
+open your browser or mail app, and only after a click. File links, Launch,
+remote-document actions, JavaScript and automatic or chained actions are not
+enabled. FitB, FitBH and FitBV destinations currently fit the page box rather
+than the content bounding box; destination percentages use the 10–1600% limits.
+
+Use **Back**/**Forward** or **Alt+Left**/**Alt+Right** to retrace page, link,
+outline, preview and search jumps. History preserves the page, document
+position and zoom at each jump, including later scrolling before going back.
+A new jump after going back clears the forward history. Opening another PDF
+starts a new history.
+
 ## Printing
 
 Use **Print…** or **Ctrl+P** (**Cmd+P** on macOS). Choose **Fit** to scale each
@@ -298,8 +313,15 @@ Set `XDG_RUNTIME_DIR` to a private directory (mode 700). Point `WAYLAND_DISPLAY`
 and `SWAYSOCK` at the sockets Sway creates in it. The test assumes a 1280×900
 output at scale one. No X server is used.
 
-This is a foundation, not a complete viewer. Links, annotations, tabs, and
-persistent preferences are not implemented yet.
+`bash tests/wayland-links.sh` uses a synthetic PDF to check internal and named
+links, outline position/zoom, same-page Back/Forward and restoration after
+scrolling. It captures native hover and Copy Link states and compares restored
+page pixels with ImageMagick (`magick` is required in addition to the Wayland
+tools above). It never activates external links; Rust tests inspect egui's URL
+and clipboard requests without dispatching them to external applications.
+
+This is a foundation, not a complete viewer. Annotations, tabs and persistent
+preferences are not implemented yet.
 
 ## CI and releases
 
