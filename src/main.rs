@@ -944,8 +944,9 @@ mod tests {
     #[test]
     fn dirty_inactive_tab_close_requires_a_successful_save_or_discard() {
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("source.pdf");
-        let replacement = directory.path().join("replacement.pdf");
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("source.pdf");
+        let replacement = root.join("replacement.pdf");
         std::fs::write(&source, document::tests::sample_pdf("", false)).unwrap();
         std::fs::write(&replacement, document::tests::sample_pdf("", false)).unwrap();
         let mut document = document::PdfDocument::open(&source).unwrap();
@@ -1000,8 +1001,9 @@ mod tests {
     fn dirty_bookmark_open_keeps_source_and_destination_through_password() {
         for encrypted in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let source = directory.path().join("source.pdf");
-            let target = directory.path().join("target.pdf");
+            let root = directory.path().canonicalize().unwrap();
+            let source = root.join("source.pdf");
+            let target = root.join("target.pdf");
             std::fs::write(&source, document::tests::sample_pdf("", false)).unwrap();
             if encrypted {
                 document::tests::encrypted_fixture(
@@ -1848,9 +1850,10 @@ mod tests {
     fn tabs_keep_independent_views_deduplicate_and_close_by_identity() {
         use persistence::{ReadingState, SidebarState, Store};
         let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
         let paths: Vec<_> = ["first.pdf", "second.pdf", "third.pdf"]
             .map(|name| {
-                let path = directory.path().join(name);
+                let path = root.join(name);
                 std::fs::write(&path, document::tests::sample_pdf("", false)).unwrap();
                 path
             })
@@ -1902,8 +1905,9 @@ mod tests {
     fn session_is_opt_in_restores_active_and_lazy_tabs_and_clears_explicitly() {
         use persistence::{ReadingState, Store};
         let directory = tempfile::tempdir().unwrap();
-        let first = directory.path().join("first.pdf");
-        let second = directory.path().join("second.pdf");
+        let root = directory.path().canonicalize().unwrap();
+        let first = root.join("first.pdf");
+        let second = root.join("second.pdf");
         for path in [&first, &second] {
             std::fs::write(path, document::tests::sample_pdf("", false)).unwrap();
         }
@@ -1957,8 +1961,9 @@ mod tests {
     fn restored_encrypted_tab_authenticates_without_disturbing_selected_document() {
         use persistence::{ReadingState, Store};
         let directory = tempfile::tempdir().unwrap();
-        let plain = directory.path().join("plain.pdf");
-        let locked = directory.path().join("locked.pdf");
+        let root = directory.path().canonicalize().unwrap();
+        let plain = root.join("plain.pdf");
+        let locked = root.join("locked.pdf");
         std::fs::write(&plain, document::tests::sample_pdf("", false)).unwrap();
         document::tests::encrypted_fixture(
             &locked,

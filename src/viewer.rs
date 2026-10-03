@@ -1229,9 +1229,10 @@ mod tests {
     fn save_as_rejects_another_open_path_and_preserves_dirty_identity() {
         use crate::annotations::{Geometry, Kind};
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("source.pdf");
-        let other = directory.path().join("other.pdf");
-        let destination = directory.path().join("destination.pdf");
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("source.pdf");
+        let other = root.join("other.pdf");
+        let destination = root.join("destination.pdf");
         for path in [&source, &other] {
             std::fs::write(path, crate::document::tests::sample_pdf("", false)).unwrap();
         }
