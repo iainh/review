@@ -64,6 +64,8 @@ struct PasswordPrompt {
 enum AppEvent {
     #[cfg(target_os = "macos")]
     OpenFile(PathBuf),
+    #[cfg(target_os = "macos")]
+    Menu(desktop::Action),
     AccessKit(egui_winit::accesskit_winit::Event),
 }
 
@@ -435,6 +437,13 @@ impl ApplicationHandler<AppEvent> for App {
                     renderer.window().focus_window();
                 }
             }
+            #[cfg(target_os = "macos")]
+            AppEvent::Menu(action) => {
+                self.desktop.enqueue(action);
+                if let Some(renderer) = &self.renderer {
+                    renderer.window().request_redraw();
+                }
+            }
             AppEvent::AccessKit(event) => {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.on_accesskit_event(event);
@@ -562,6 +571,14 @@ impl ApplicationHandler<AppEvent> for App {
                             && !ui.input(|input| input.key_pressed(Key::F1));
                         self.desktop
                             .sync_library(&self.store.state, self.viewer.as_ref());
+                        #[cfg(target_os = "macos")]
+                        macos::sync_menu(
+                            &self.store.state,
+                            self.viewer.as_ref(),
+                            self.native_ui.appearance,
+                            self.viewer.as_ref().is_some_and(Viewer::can_print),
+                            !library_enabled,
+                        );
                         let (action, owns_input) = self.desktop.show(
                             ui,
                             self.viewer.is_some(),
@@ -622,6 +639,8 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 });
                 quit |= desktop::close_requested(&output);
+                #[cfg(target_os = "macos")]
+                let had_desktop_action = desktop_action.is_some();
                 match desktop_action {
                     Some(desktop::Action::Open) => open_requested = true,
                     Some(desktop::Action::OpenRecent(path)) => recent_requested = Some(path),
@@ -680,6 +699,12 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     Some(desktop::Action::Help) => self.native_ui.open_help(&renderer.context),
                     None => {}
+                }
+                #[cfg(target_os = "macos")]
+                if had_desktop_action {
+                    // Native menu state is synchronized before dispatch. Repaint
+                    // once more so checks and enabled items reflect this action.
+                    renderer.window().request_redraw();
                 }
                 let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
                 self.repaint_at = Instant::now().checked_add(delay);

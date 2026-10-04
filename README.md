@@ -257,12 +257,14 @@ hand the PDF to another application.
 
 ## Accessibility and appearance
 
-The desktop titlebar provides **File**, **View** and **Help** menus, native
-window controls, dragging and edge resizing. Document tabs sit below it,
-including when only one PDF is open. **File** uses the same Open, Save, Print
-and protected Close/Quit paths as the document controls. Unavailable actions
-are disabled. Menus adapt to narrow windows; **Ctrl+F2**, arrows and
-**Enter**/**Space** navigate them, and **Escape** dismisses them.
+The desktop titlebar provides native window controls, dragging and edge resizing.
+On macOS, **File**, **Recent**, **Bookmarks**, **View** and **Help** are in the
+system menu bar; on Linux and Windows they are in the titlebar. Document tabs
+sit below it, including when only one PDF is open. Menu actions use the same
+Open, Save, Print and protected Close/Quit paths as the document controls. Unavailable actions
+are disabled. On Linux and Windows, menus adapt to narrow windows;
+**Ctrl+F2**, arrows and **Enter**/**Space** navigate them, and **Escape**
+dismisses them.
 
 **Tab** and **Shift+Tab** move between controls. **Enter** or **Space** activates
 a focused button. **F6**/**Shift+F6** cycles the page, zoom, search and page-text

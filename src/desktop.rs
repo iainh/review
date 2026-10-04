@@ -119,6 +119,12 @@ impl Default for Desktop {
         .add_menu_with_submenu(bookmarks)
         .add_menu_with_submenu(view)
         .add_menu_with_submenu(help);
+        #[cfg(target_os = "macos")]
+        let bar = {
+            let mut bar = bar;
+            bar.menu_order.clear();
+            bar
+        };
         Self {
             bar,
             actions_tx: tx,
@@ -128,6 +134,11 @@ impl Default for Desktop {
 }
 
 impl Desktop {
+    #[cfg(target_os = "macos")]
+    pub fn enqueue(&self, action: Action) {
+        let _ = self.actions_tx.send(action);
+    }
+
     pub fn sync_library(&mut self, state: &State, viewer: Option<&Viewer>) {
         let mut recent = Vec::new();
         if state.recent.is_empty() {
