@@ -394,11 +394,9 @@ impl App {
         }
         if let Some(renderer) = &self.renderer {
             let window = renderer.window();
-            self.store.state.window.maximized = window.is_maximized();
-            if !window.is_maximized()
-                && window.fullscreen().is_none()
-                && window.is_minimized() != Some(true)
-            {
+            let maximized = renderer.is_maximized();
+            self.store.state.window.maximized = maximized;
+            if !maximized && window.fullscreen().is_none() && window.is_minimized() != Some(true) {
                 let size = window.inner_size().to_logical::<f64>(window.scale_factor());
                 if size.width >= 320.0 && size.height >= 320.0 {
                     self.store.state.window.size = [size.width, size.height];
@@ -483,6 +481,7 @@ impl ApplicationHandler<AppEvent> for App {
                 window,
                 event_loop,
                 self.proxy.clone().unwrap(),
+                geometry.maximized,
             ))
             .context("failed to initialize graphics")
         })();

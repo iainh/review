@@ -12,6 +12,8 @@ use crate::AppEvent;
 
 pub struct Renderer {
     window: Arc<Window>,
+    #[cfg(target_os = "macos")]
+    maximized: bool,
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -27,6 +29,7 @@ impl Renderer {
         window: Arc<Window>,
         event_loop: &ActiveEventLoop,
         proxy: EventLoopProxy<AppEvent>,
+        _maximized: bool,
     ) -> Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
@@ -94,6 +97,8 @@ impl Renderer {
 
         Ok(Self {
             window,
+            #[cfg(target_os = "macos")]
+            maximized: _maximized,
             instance,
             surface,
             device,
@@ -109,6 +114,17 @@ impl Renderer {
         &self.window
     }
 
+    pub fn is_maximized(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.maximized
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.window.is_maximized()
+        }
+    }
+
     pub fn on_event(&mut self, event: &WindowEvent) {
         let response = self.input.on_window_event(&self.window, event);
         if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
@@ -120,7 +136,7 @@ impl Renderer {
         let mut input = self.input.take_egui_input(&self.window);
         let viewport = input.viewports.entry(egui::ViewportId::ROOT).or_default();
         viewport.fullscreen = Some(self.window.fullscreen().is_some());
-        viewport.maximized = Some(self.window.is_maximized());
+        viewport.maximized = Some(self.is_maximized());
         input
     }
 
@@ -151,6 +167,12 @@ impl Renderer {
 
     pub fn render(&mut self, mut output: egui::FullOutput) -> Result<()> {
         if let Some(viewport) = output.viewport_output.get(&egui::ViewportId::ROOT) {
+            #[cfg(target_os = "macos")]
+            for command in &viewport.commands {
+                if let egui::ViewportCommand::Maximized(maximized) = command {
+                    self.maximized = *maximized;
+                }
+            }
             // Use egui-winit's native handling (including X11's drag focus
             // guard). Close belongs to App's dirty-document protection, never
             // to the renderer. Only accept commands this single-window shell

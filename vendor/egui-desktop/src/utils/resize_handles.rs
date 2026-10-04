@@ -111,6 +111,9 @@ fn create_resize_handle(
 ) {
     Area::new(Id::new(area_id))
         .movable(false)
+        // Invisible hit targets have nothing to animate. Their overlapping
+        // areas also never settle egui's visibility-based fade-in tracking.
+        .fade_in(false)
         .fixed_pos(position)
         .show(ctx, |ui| {
             ui.set_min_size(size);
