@@ -738,13 +738,10 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     self.renderer.as_ref().unwrap().window().request_redraw();
                 }
-                match library_action {
-                    Some(()) => {
-                        self.store.state.clear_history();
-                        self.session_cleared = true;
-                        force_save = true;
-                    }
-                    None => {}
+                if let Some(()) = library_action {
+                    self.store.state.clear_history();
+                    self.session_cleared = true;
+                    force_save = true;
                 }
                 match tab_action {
                     Some(tabs::Action::Select(id)) => self.select_tab(id),
