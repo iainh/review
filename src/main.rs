@@ -999,7 +999,7 @@ fn main() -> Result<()> {
         .build()
         .context("failed to create event loop")?;
     #[cfg(target_os = "macos")]
-    let _open_documents = macos::OpenDocuments::install(event_loop.create_proxy());
+    macos::install(event_loop.create_proxy());
     let mut app = App::new();
     app.proxy = Some(event_loop.create_proxy());
     if let Some(path) = path {
