@@ -66,6 +66,7 @@ enum AppEvent {
     OpenFile(PathBuf),
     #[cfg(target_os = "macos")]
     Menu(desktop::Action),
+    Repaint,
     AccessKit(egui_winit::accesskit_winit::Event),
 }
 
@@ -440,6 +441,11 @@ impl ApplicationHandler<AppEvent> for App {
             #[cfg(target_os = "macos")]
             AppEvent::Menu(action) => {
                 self.desktop.enqueue(action);
+                if let Some(renderer) = &self.renderer {
+                    renderer.window().request_redraw();
+                }
+            }
+            AppEvent::Repaint => {
                 if let Some(renderer) = &self.renderer {
                     renderer.window().request_redraw();
                 }

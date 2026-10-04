@@ -82,14 +82,13 @@ impl Renderer {
         let context = egui::Context::default();
         crate::icons::install(&context);
         context.set_theme(egui::ThemePreference::System);
-        let repaint_window = Arc::downgrade(&window);
+        let repaint_proxy = proxy.clone();
         context.set_request_repaint_callback(move |request| {
             // Delayed UI repaints are scheduled from FullOutput by App.
-            // Worker contexts must not keep a window alive after shutdown.
-            if request.delay.is_zero()
-                && let Some(window) = repaint_window.upgrade()
-            {
-                window.request_redraw();
+            // Post through winit's proxy so a worker never calls macOS window
+            // APIs while holding egui's context lock.
+            if request.delay.is_zero() {
+                let _ = repaint_proxy.send_event(AppEvent::Repaint);
             }
         });
         let mut input = egui_winit::State::new(
