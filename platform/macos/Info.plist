@@ -12,6 +12,8 @@
     <string>Review</string>
     <key>CFBundleDisplayName</key>
     <string>Review</string>
+    <key>CFBundleIconFile</key>
+    <string>review.icns</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>

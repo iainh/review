@@ -48,6 +48,11 @@ try {
                 throw "Incorrect quoted open command at $key"
             }
         }
+        foreach ($key in @("$classes\Review.PDF\DefaultIcon", "$classes\Applications\review.exe\DefaultIcon")) {
+            if ((Get-Item $key).GetValue('') -ne ($executable + ',0')) {
+                throw "Incorrect application icon at $key"
+            }
+        }
         if ((Get-Item "$pdf\OpenWithProgids").GetValueNames() -notcontains 'Review.PDF') {
             throw 'Review is missing from PDF Open With registration'
         }

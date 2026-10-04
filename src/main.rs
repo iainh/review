@@ -39,9 +39,18 @@ use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
-    window::{Window, WindowId},
+    window::{Icon, Window, WindowId},
 };
 use zeroize::{Zeroize, Zeroizing};
+
+fn app_icon() -> Icon {
+    let image = image::load_from_memory(include_bytes!("../assets/review-256.png"))
+        .expect("bundled application icon must be a valid PNG")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    Icon::from_rgba(image.into_raw(), width, height)
+        .expect("bundled application icon must contain valid RGBA pixels")
+}
 
 struct PasswordPrompt {
     path: PathBuf,
@@ -441,6 +450,7 @@ impl ApplicationHandler<AppEvent> for App {
         let geometry = &self.store.state.window;
         let mut attributes = Window::default_attributes()
             .with_title("Review")
+            .with_window_icon(Some(app_icon()))
             .with_visible(false)
             .with_decorations(false)
             .with_inner_size(winit::dpi::LogicalSize::new(

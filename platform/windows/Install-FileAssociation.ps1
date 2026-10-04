@@ -17,9 +17,11 @@ function Set-StringValue($Path, $Name, $Value) {
 }
 
 Set-StringValue "$classes\Review.PDF" '(default)' 'PDF document'
+Set-StringValue "$classes\Review.PDF\DefaultIcon" '(default)' ($Executable + ',0')
 Set-StringValue "$classes\Review.PDF\shell\open\command" '(default)' $command
 Set-StringValue "$classes\.pdf\OpenWithProgids" 'Review.PDF' ''
 Set-StringValue "$classes\Applications\review.exe" 'FriendlyAppName' 'Review'
+Set-StringValue "$classes\Applications\review.exe\DefaultIcon" '(default)' ($Executable + ',0')
 Set-StringValue "$classes\Applications\review.exe\SupportedTypes" '.pdf' ''
 Set-StringValue "$classes\Applications\review.exe\shell\open\command" '(default)' $command
 

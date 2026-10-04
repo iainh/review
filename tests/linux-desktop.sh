@@ -16,6 +16,7 @@ printf '[Desktop Entry]\nType=Application\nName=Other\nExec=true\n' > "$XDG_DATA
 package="$scratch/Review résumé \"quoted\" \$dollar \`tick\` %f \\ slash"
 mkdir -p -- "$package"
 cp "$root"/platform/linux/* "$package/"
+cp "$root/assets/review-256.png" "$package/review.png"
 cat > "$package/review" <<'SCRIPT'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$REVIEW_TEST_OUTPUT"
@@ -28,6 +29,8 @@ for _ in 1 2; do
     bash "$package/install-desktop.sh"
 done
 entry="$XDG_DATA_HOME/applications/review.desktop"
+icon="$XDG_DATA_HOME/icons/hicolor/256x256/apps/review.png"
+cmp "$root/assets/review-256.png" "$icon"
 if command -v desktop-file-validate >/dev/null 2>&1; then
     desktop-file-validate "$entry"
 fi
@@ -44,6 +47,6 @@ echo 'PASS: desktop launch preserves special executable characters and Unicode P
 for _ in 1 2; do
     bash "$package/uninstall-desktop.sh"
 done
-[[ ! -e "$entry" && -e "$XDG_DATA_HOME/applications/other.desktop" ]]
+[[ ! -e "$entry" && ! -e "$icon" && -e "$XDG_DATA_HOME/applications/other.desktop" ]]
 cmp "$scratch/original-defaults" "$XDG_CONFIG_HOME/mimeapps.list"
 echo 'PASS: registration/removal are idempotent and preserve existing defaults and other apps'

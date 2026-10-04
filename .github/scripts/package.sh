@@ -36,6 +36,7 @@ case "$extension" in
   tar.gz)
     cp platform/linux/review.desktop platform/linux/install-desktop.sh \
       platform/linux/uninstall-desktop.sh "$staging/$name/"
+    cp assets/review-256.png "$staging/$name/review.png"
     chmod +x "$staging/$name/"*.sh
     tar -czf "$archive" -C "$staging" "$name"
     mkdir "$staging/extracted"
@@ -44,9 +45,10 @@ case "$extension" in
     ;;
   dmg)
     bundle="$staging/$name/Review.app"
-    mkdir -p "$bundle/Contents/MacOS"
+    mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
     mv "$staging/$name/$executable" "$bundle/Contents/MacOS/"
     cp platform/macos/Info.plist "$bundle/Contents/Info.plist"
+    cp platform/macos/review.icns "$bundle/Contents/Resources/review.icns"
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$bundle/Contents/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$bundle/Contents/Info.plist"
     plutil -lint "$bundle/Contents/Info.plist"
