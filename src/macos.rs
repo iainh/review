@@ -1,16 +1,46 @@
-//! Finder sends documents through the application delegate, not command-line arguments.
+//! AppKit window chrome and Finder document opening.
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use objc2::runtime::{AnyObject, ClassBuilder, ProtocolObject, Sel};
 use objc2::sel;
-use objc2_app_kit::{NSApplication, NSApplicationDelegate};
+use objc2_app_kit::{NSApplication, NSApplicationDelegate, NSView};
 use objc2_foundation::{MainThreadMarker, NSArray, NSURL};
 use winit::event_loop::EventLoopProxy;
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use winit::window::Window;
 
 use crate::AppEvent;
 
 static PROXY: OnceLock<EventLoopProxy<AppEvent>> = OnceLock::new();
+
+/// Clip the content layer after wgpu installs it, including after surface recovery.
+pub fn round_window(window: &Window, maximized: bool) {
+    let RawWindowHandle::AppKit(handle) = window
+        .window_handle()
+        .expect("the live window has a native handle")
+        .as_raw()
+    else {
+        unreachable!("a macOS window has an AppKit handle");
+    };
+    // SAFETY: winit lends its live NSView for the duration of this call. Renderer
+    // calls this only on the event-loop/main thread, after creating the surface.
+    let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    view.setWantsLayer(true);
+    let layer = view.layer().expect("the layer-backed window has a layer");
+    let radius = if maximized || window.fullscreen().is_some() {
+        0.0
+    } else {
+        12.0
+    };
+    // Avoid restarting Core Animation updates on every repaint.
+    if layer.cornerRadius() != radius {
+        layer.setCornerRadius(radius);
+    }
+    if !layer.masksToBounds() {
+        layer.setMasksToBounds(true);
+    }
+}
 
 extern "C-unwind" fn open_urls(
     _delegate: &AnyObject,

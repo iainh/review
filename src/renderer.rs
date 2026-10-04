@@ -58,6 +58,16 @@ impl Renderer {
             .copied()
             .find(|format| !format.is_srgb())
             .unwrap_or(capabilities.formats[0]);
+        let alpha_mode = capabilities.alpha_modes[0];
+        // A non-opaque Metal layer lets AppKit composite its clipped corners.
+        // The UI stays opaque; only the native corner mask exposes the desktop.
+        #[cfg(target_os = "macos")]
+        let alpha_mode = capabilities
+            .alpha_modes
+            .iter()
+            .copied()
+            .find(|mode| *mode == wgpu::CompositeAlphaMode::PostMultiplied)
+            .unwrap_or(alpha_mode);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -65,7 +75,7 @@ impl Renderer {
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
-            alpha_mode: capabilities.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
         };
         surface.configure(&device, &config);
@@ -92,6 +102,8 @@ impl Renderer {
         );
         // AccessKit must attach before the window is first made visible.
         input.init_accesskit(event_loop, &window, proxy);
+        #[cfg(target_os = "macos")]
+        crate::macos::round_window(&window, _maximized);
         window.set_visible(true);
         let painter = egui_wgpu::Renderer::new(&device, format, Default::default());
 
@@ -287,6 +299,8 @@ impl Renderer {
         let commands =
             self.painter
                 .update_buffers(&self.device, &self.queue, &mut encoder, &jobs, &screen);
+        #[cfg(target_os = "macos")]
+        crate::macos::round_window(&self.window, self.is_maximized());
         {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewer pass"),

@@ -69,6 +69,10 @@ commands through egui-winit, while titlebar Close goes through App's normal
 dirty-document confirmation. Native pointer grabs can consume the mouse release;
 the renderer ends egui's gesture and queues its release when handing off a move
 or resize. The Wayland test asserts move followed by resize changes geometry.
-No raw window pointers or title-based native window lookup are added. Remove
-this adaptation when upstream supports the current egui generation and
-host-managed shortcuts/root-Ui rendering.
+Review owns native corner rounding: winit requests DWM rounding on Windows 11,
+and AppKit clips the transparent macOS window's content layer at a 12-point
+radius (zero while maximized or fullscreen). Linux rounding remains compositor
+policy, as in upstream. The AppKit view is borrowed from the live winit window;
+there is no cached pointer or title-based window lookup. Remove this adaptation
+when upstream supports the current egui generation and host-managed
+shortcuts/root-Ui rendering.

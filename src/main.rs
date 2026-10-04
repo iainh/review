@@ -453,6 +453,8 @@ impl ApplicationHandler<AppEvent> for App {
             .with_window_icon(Some(app_icon()))
             .with_visible(false)
             .with_decorations(false)
+            // AppKit must leave the pixels clipped by the content layer clear.
+            .with_transparent(cfg!(target_os = "macos"))
             .with_inner_size(winit::dpi::LogicalSize::new(
                 geometry.size[0],
                 geometry.size[1],
@@ -473,6 +475,12 @@ impl ApplicationHandler<AppEvent> for App {
                 attributes = attributes.with_position(winit::dpi::PhysicalPosition::new(x, y));
             }
         }
+        #[cfg(target_os = "windows")]
+        let attributes = {
+            use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
+            // DWM chooses the radius and suppresses rounding when maximized/snapped.
+            attributes.with_corner_preference(CornerPreference::Round)
+        };
         #[cfg(target_os = "linux")]
         let attributes = {
             use winit::platform::{
