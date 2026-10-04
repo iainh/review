@@ -67,6 +67,7 @@ impl Renderer {
         };
         surface.configure(&device, &config);
         let context = egui::Context::default();
+        crate::icons::install(&context);
         context.set_theme(egui::ThemePreference::System);
         let repaint_window = Arc::downgrade(&window);
         context.set_request_repaint_callback(move |request| {

@@ -82,7 +82,7 @@ wait_text() { accessibility status "$1"; }
 click_word() {
     local label
     case "$1" in
-        ocr) label=OCR ;;
+        ocr) accessibility click Tools; label=OCR ;;
         recognize) label='Recognize page 1' ;;
         find) label=Find ;;
         close) label='Close OCR' ;;
@@ -181,6 +181,7 @@ echo 'PASS: recognition is per-page and session-only; original bytes unchanged'
 
 open_pdf restricted-scan
 wl-copy 'permission sentinel'
+accessibility click Tools
 accessibility click 'Page text'
 accessibility pane ''
 capture ocr-page-text-empty

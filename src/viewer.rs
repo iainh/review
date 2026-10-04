@@ -4,6 +4,7 @@ use crate::{
     annotations::{AnnotationUi, Kind},
     document::PdfDocument,
     forms::Forms,
+    icons::{self, Icon},
     inspector::Inspector,
     layout::LayoutMode,
     links::LinkTarget,
@@ -369,7 +370,8 @@ impl Viewer {
         self.fields_id.with(name)
     }
 
-    pub fn ui(&mut self, root: &mut egui::Ui, open_requested: &mut bool) {
+    pub fn ui(&mut self, root: &mut egui::Ui, _open_requested: &mut bool) {
+        icons::ensure_installed(root.ctx());
         self.fields_id = root.make_persistent_id("viewer_fields");
         let page_input_id = self.field_id("page_input");
         let zoom_input_id = self.field_id("zoom_input");
@@ -529,40 +531,31 @@ impl Viewer {
         )));
 
         egui::Panel::top("toolbar").show_inside(root, |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.visuals_mut().disabled_alpha = 0.65;
             ui.horizontal_wrapped(|ui| {
-                if ui
-                    .selectable_label(self.sidebar.open, "Sidebar")
-                    .on_hover_text("F9")
-                    .clicked()
-                {
+                if icons::selectable_button(ui, Icon::PanelLeft, "Sidebar (F9)", self.sidebar.open).clicked() {
                     self.sidebar.open = !self.sidebar.open;
                 }
+                if ui.add_enabled_ui(self.history.can_back(), |ui| icons::button(ui, Icon::ChevronLeft, "Back (Alt+Left)")).inner.clicked() {
+                    self.navigate_history(true);
+                }
+                if ui.add_enabled_ui(self.history.can_forward(), |ui| icons::button(ui, Icon::ChevronRight, "Forward (Alt+Right)")).inner.clicked() {
+                    self.navigate_history(false);
+                }
                 ui.separator();
-                if ui
-                    .add_enabled(
-                        self.document.current_page() > 0,
-                        egui::Button::new("Previous"),
-                    )
-                    .clicked()
-                {
+                if ui.add_enabled_ui(self.document.current_page() > 0, |ui| icons::button(ui, Icon::ArrowLeft, "Previous")).inner.clicked() {
                     self.change_page(-1);
                 }
-                if ui
-                    .add_enabled(
-                        self.document.current_page() + 1 < self.document.page_count(),
-                        egui::Button::new("Next"),
-                    )
-                    .clicked()
-                {
+                if ui.add_enabled_ui(self.document.current_page() + 1 < self.document.page_count(), |ui| icons::button(ui, Icon::ArrowRight, "Next")).inner.clicked() {
                     self.change_page(1);
                 }
-                ui.separator();
                 let page_label = ui.label("Page");
                 let field = ui
                     .add(
                         egui::TextEdit::singleline(&mut self.page_input)
                             .id(page_input_id)
-                            .desired_width(48.0),
+                            .desired_width(42.0),
                     )
                     .labelled_by(page_label.id)
                     .on_hover_text("Physical page number or exact PDF label (Ctrl+G / Cmd+G). Numbers always select physical pages.");
@@ -583,22 +576,19 @@ impl Viewer {
                     self.go_to_page(self.document.current_page());
                 }
                 if let Ok(label) = self.document.page_label(self.document.current_page())
-                    && !label.is_empty() && label != (self.document.current_page() + 1).to_string() {
-                    ui.label(format!("Label: {label}"));
+                    && !label.is_empty() && label != (self.document.current_page() + 1).to_string()
+                {
+                    ui.label(format!("· {label}"));
                 }
                 ui.separator();
-                let zoom_out = ui.button("−").on_hover_text("Zoom out");
-                zoom_out.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Zoom out")
-                });
-                if zoom_out.clicked() {
+                if icons::button(ui, Icon::ZoomOut, "Zoom out").clicked() {
                     self.change_zoom(0.8);
                 }
                 let field = ui
                     .add(
                         egui::TextEdit::singleline(&mut self.zoom_input)
                             .id(zoom_input_id)
-                            .desired_width(44.0),
+                            .desired_width(42.0),
                     )
                     .on_hover_text("Zoom percentage (Ctrl+L / Cmd+L), 10–1600%");
                 ctx.accesskit_node_builder(field.id, |node| node.set_label("Zoom percentage"));
@@ -630,128 +620,117 @@ impl Viewer {
                         ctx.request_repaint();
                     }
                 }
-                let zoom_in = ui.button("+").on_hover_text("Zoom in");
-                zoom_in.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Zoom in")
-                });
-                if zoom_in.clicked() {
+                if icons::button(ui, Icon::ZoomIn, "Zoom in").clicked() {
                     self.change_zoom(1.25);
                 }
-                if ui
-                    .selectable_label(self.zoom == Zoom::FitPage, "Fit page")
-                    .clicked()
-                {
+                if icons::selectable_button(ui, Icon::Maximize, "Fit page (0)", self.zoom == Zoom::FitPage).clicked() {
                     self.zoom = Zoom::FitPage;
                 }
-                if ui
-                    .selectable_label(self.zoom == Zoom::FitWidth, "Fit width")
-                    .clicked()
-                {
-                    self.zoom = Zoom::FitWidth;
-                }
                 ui.separator();
-                if ui
-                    .button("Search")
-                    .on_hover_text("Ctrl+F / Cmd+F")
-                    .clicked()
-                {
+                if icons::selectable_button(ui, Icon::Search, "Search (Ctrl+F / Cmd+F)", self.search.open).clicked() {
                     self.search.open = true;
                     focus_search = true;
                 }
-                if ui.selectable_label(self.ocr.open, "OCR").clicked() {
-                    if self.ocr.open {
-                        self.ocr.cancel();
+                if ui.add_enabled_ui(self.document.can_undo(), |ui| icons::button(ui, Icon::Undo2, "Undo (Ctrl+Z / Cmd+Z)")).inner.clicked() {
+                    self.inspector.invalidate();
+                    let result = self.document.undo();
+                    self.edited(result, &ctx);
+                }
+                if ui.add_enabled_ui(self.document.can_redo(), |ui| icons::button(ui, Icon::Redo2, "Redo (Ctrl+Shift+Z / Cmd+Shift+Z)")).inner.clicked() {
+                    self.inspector.invalidate();
+                    let result = self.document.redo();
+                    self.edited(result, &ctx);
+                }
+                if icons::button(ui, Icon::Save, "Save (Ctrl+S / Cmd+S)").clicked() {
+                    self.save_requested = Some(false);
+                }
+                ui.menu_button("Tools", |ui| {
+                    if ui.selectable_label(self.annotations.open, "Annotations").clicked() {
+                        self.annotations.open = !self.annotations.open;
+                        self.annotations.tool = None;
+                        self.forms.open = false;
+                        ui.close();
                     }
-                    self.ocr.open = !self.ocr.open;
-                }
-                ui.separator();
-                if ui.button("Open…").on_hover_text("Ctrl+O / Cmd+O").clicked() {
-                    *open_requested = true;
-                }
-                if ui
-                    .add_enabled(
-                        self.document.permissions().print,
-                        egui::Button::new("Print…"),
-                    )
-                    .on_hover_text("Ctrl+P / Cmd+P")
-                    .on_disabled_hover_text("This PDF does not allow printing")
-                    .clicked()
-                {
-                    self.printing.open = true;
-                }
-                if ui
-                    .selectable_label(self.page_text.open, "Page text")
-                    .on_hover_text("Read extracted page text (Ctrl+Shift+T / Cmd+Shift+T)")
-                    .clicked()
-                {
-                    self.page_text.toggle(&ctx);
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(self.history.can_back(), egui::Button::new("Back"))
-                    .on_hover_text("Alt+Left")
-                    .clicked()
-                {
-                    self.navigate_history(true);
-                }
-                if ui
-                    .add_enabled(self.history.can_forward(), egui::Button::new("Forward"))
-                    .on_hover_text("Alt+Right")
-                    .clicked()
-                {
-                    self.navigate_history(false);
-                }
-                if ui.selectable_label(self.inspector.open, "Properties").on_hover_text("Ctrl+D / Cmd+D").clicked() {
-                    self.inspector.open = !self.inspector.open;
-                }
-                if ui.button("Save").on_hover_text("Ctrl+S / Cmd+S").clicked() { self.save_requested = Some(false); }
-                if ui.button("Save As…").on_hover_text("Ctrl+Shift+S / Cmd+Shift+S").clicked() { self.save_requested = Some(true); }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui.selectable_label(self.annotations.open, "Annotations").clicked() {
-                    self.annotations.open = !self.annotations.open;
-                    self.annotations.tool = None;
-                    self.forms.open = false;
-                }
-                let quads = self.selection.quads(self.document.current_page());
-                for kind in [Kind::Highlight, Kind::Underline, Kind::StrikeOut] {
-                    if ui.add_enabled(self.document.permissions().annotate && !quads.is_empty(), egui::Button::new(kind.label())).on_disabled_hover_text("Select text first; this PDF must allow annotations").clicked() {
-                        self.inspector.invalidate();
-                        let result = self.annotations.add_markup(&mut self.document, kind, quads.clone());
-                        self.edited(result, &ctx);
+                    if ui.selectable_label(self.forms.open, "Forms").clicked() {
+                        self.forms.open = !self.forms.open;
+                        self.annotations.open = false;
+                        self.annotations.tool = None;
+                        self.annotations.invalidate();
+                        ui.close();
                     }
-                }
-                if ui.add_enabled(self.document.can_undo(), egui::Button::new("Undo")).clicked() { self.inspector.invalidate(); let result = self.document.undo(); self.edited(result, &ctx); }
-                if ui.add_enabled(self.document.can_redo(), egui::Button::new("Redo")).clicked() { self.inspector.invalidate(); let result = self.document.redo(); self.edited(result, &ctx); }
-                if ui.selectable_label(self.forms.open, "Forms").clicked() {
-                    self.forms.open = !self.forms.open;
-                    self.annotations.open = false;
-                    self.annotations.tool = None;
-                    self.annotations.invalidate();
-                }
-                if self.document.is_dirty() { ui.label("Unsaved changes"); }
-            });
-            ui.horizontal_wrapped(|ui| {
-                egui::ComboBox::from_label("Layout")
-                    .selected_text(self.reading.mode.label())
-                    .show_ui(ui, |ui| {
-                        for mode in [LayoutMode::Single, LayoutMode::Continuous, LayoutMode::Facing] {
-                            ui.selectable_value(&mut self.reading.mode, mode, mode.label());
+                    if ui.selectable_label(self.ocr.open, "OCR").clicked() {
+                        if self.ocr.open {
+                            self.ocr.cancel();
                         }
-                    });
-                if ui.button("Rotate left").on_hover_text("Shift+R").clicked() {
-                    self.reading.rotation.turn(false);
-                }
-                if ui.button("Rotate right").on_hover_text("R").clicked() {
-                    self.reading.rotation.turn(true);
-                }
-                ui.separator();
-                ui.selectable_value(&mut self.reading.hand, false, "Select text");
-                ui.selectable_value(&mut self.reading.hand, true, "Hand tool").on_hover_text("Drag to pan (H)");
-                if ui.selectable_label(fullscreen, "Fullscreen").on_hover_text("F11").clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+                        self.ocr.open = !self.ocr.open;
+                        ui.close();
+                    }
+                    if ui.selectable_label(self.page_text.open, "Page text").on_hover_text("Ctrl+Shift+T / Cmd+Shift+T").clicked() {
+                        self.page_text.toggle(&ctx);
+                        ui.close();
+                    }
+                    if ui.selectable_label(self.inspector.open, "Document properties").on_hover_text("Ctrl+D / Cmd+D").clicked() {
+                        self.inspector.open = !self.inspector.open;
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Reading options", |ui| {
+                    ui.label("Page layout");
+                    for mode in [LayoutMode::Single, LayoutMode::Continuous, LayoutMode::Facing] {
+                        if ui.selectable_value(&mut self.reading.mode, mode, mode.label()).clicked() {
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Fit width").clicked() {
+                        self.zoom = Zoom::FitWidth;
+                        ui.close();
+                    }
+                    if ui.button("Rotate left  ·  Shift+R").clicked() {
+                        self.reading.rotation.turn(false);
+                        ui.close();
+                    }
+                    if ui.button("Rotate right  ·  R").clicked() {
+                        self.reading.rotation.turn(true);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.selectable_value(&mut self.reading.hand, false, "Select text").clicked() {
+                        ui.close();
+                    }
+                    if ui.selectable_value(&mut self.reading.hand, true, "Hand tool  ·  H").clicked() {
+                        ui.close();
+                    }
+                    if ui.selectable_label(fullscreen, "Fullscreen  ·  F11").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+                        ui.close();
+                    }
+                });
+                if self.document.is_dirty() {
+                    ui.colored_label(ui.visuals().warn_fg_color, "● Unsaved");
                 }
             });
+            if self.annotations.open {
+                ui.horizontal(|ui| {
+                    ui.label("Markup");
+                    let quads = self.selection.quads(self.document.current_page());
+                    for (kind, icon) in [
+                        (Kind::Highlight, Icon::Highlighter),
+                        (Kind::Underline, Icon::Underline),
+                        (Kind::StrikeOut, Icon::Strikethrough),
+                    ] {
+                        let response = ui.add_enabled_ui(
+                            self.document.permissions().annotate && !quads.is_empty(),
+                            |ui| icons::button(ui, icon, kind.label()),
+                        ).inner.on_disabled_hover_text("Select text first; this PDF must allow annotations");
+                        if response.clicked() {
+                            self.inspector.invalidate();
+                            let result = self.annotations.add_markup(&mut self.document, kind, quads.clone());
+                            self.edited(result, &ctx);
+                        }
+                    }
+                });
+            }
             let permissions = self.document.permissions();
             if !permissions.print || !permissions.print_high_quality || !permissions.copy {
                 let printing = if !permissions.print {

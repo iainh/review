@@ -38,6 +38,10 @@ def find(name, role=None):
 
 
 def click(name, role=None):
+    if name == "Forms" and not named(name, role):
+        click("Tools", "push button")
+    if name in {"Facing pages", "Rotate right"} and not named(name, role):
+        click("Reading options", "push button")
     action = find(name, role).queryAction()
     assert action.nActions and action.doAction(0), name
     time.sleep(.3)
@@ -154,7 +158,6 @@ with subprocess.Popen(["wtype", "-s", "120000"]) as keyboard:
                     click("Cancel", "push button")
                     if filename == "forms":
                         click("Close", "push button")
-                        click("Layout", "combo box")
                         click("Facing pages", "push button")
                         click("Rotate right", "push button")
                         wait(lambda: named("PDF page 2", "image"), "facing page two")

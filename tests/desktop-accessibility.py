@@ -51,6 +51,8 @@ def find(name, role="push button", enabled=True):
 
 
 def click(name):
+    if name == "Forms" and not named(name):
+        click("Tools")
     assert find(name).queryAction().doAction(0), name
     time.sleep(.3)
 
@@ -129,7 +131,7 @@ with subprocess.Popen(["wtype", "-s", "300000"]) as keyboard, \
     try:
         find("File")
         assert tree()["shell"] == "xdg_shell"
-        for label in ["View", "Help", "Close window", "Maximize window", "Minimize window"]:
+        for label in ["Recent", "Bookmarks", "View", "Help", "Close window", "Maximize window", "Minimize window"]:
             find(label)
         capture("empty")
         click("File")
@@ -162,6 +164,8 @@ with subprocess.Popen(["wtype", "-s", "300000"]) as keyboard, \
         # Keyboard menu navigation must invoke the real callback, with no
         # document navigation when arrows belong to the desktop menu.
         key("F2", "ctrl")
+        key("Right")
+        key("Right")
         key("Right")
         key("Right")
         key("Return")

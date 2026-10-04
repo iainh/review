@@ -1,13 +1,24 @@
 //! Desktop chrome. The app, not menu callbacks, owns document operations.
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use egui_desktop::{KeyboardShortcut, MenuItem, SubMenuItem, TitleBar, TitleBarOptions};
 
-use crate::native_ui::Appearance;
+use crate::{
+    native_ui::Appearance,
+    persistence::{Bookmark, MAX_BOOKMARKS, State},
+    viewer::Viewer,
+};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     Open,
+    OpenRecent(PathBuf),
+    OpenBookmark(Bookmark),
+    ToggleBookmark,
+    RemoveBookmark(usize),
+    ClearHistory,
+    RestoreSession(bool),
     Save(bool),
     Print,
     CloseTab,
@@ -19,6 +30,7 @@ pub enum Action {
 
 pub struct Desktop {
     bar: TitleBar,
+    actions_tx: Sender<Action>,
     actions: Receiver<Action>,
 }
 
@@ -30,7 +42,7 @@ fn item(
 ) -> SubMenuItem {
     let tx = tx.clone();
     let mut item = SubMenuItem::new(label).with_callback(Box::new(move || {
-        let _ = tx.send(action);
+        let _ = tx.send(action.clone());
     }));
     item.shortcut = shortcut;
     item
@@ -95,19 +107,122 @@ impl Default for Desktop {
             Action::Help,
             Some(KeyboardShortcut::new(egui::Key::F1)),
         ));
+        let recent = MenuItem::new("Recent");
+        let bookmarks = MenuItem::new("Bookmarks");
         let bar = TitleBar::new(
             TitleBarOptions::new()
                 .with_title("Review")
                 .with_title_visibility(true, true, true),
         )
         .add_menu_with_submenu(file)
+        .add_menu_with_submenu(recent)
+        .add_menu_with_submenu(bookmarks)
         .add_menu_with_submenu(view)
         .add_menu_with_submenu(help);
-        Self { bar, actions }
+        Self {
+            bar,
+            actions_tx: tx,
+            actions,
+        }
     }
 }
 
 impl Desktop {
+    pub fn sync_library(&mut self, state: &State, viewer: Option<&Viewer>) {
+        let mut recent = Vec::new();
+        if state.recent.is_empty() {
+            recent.push(SubMenuItem::new("No recent files").disabled());
+        } else {
+            for entry in &state.recent {
+                let name = entry
+                    .path
+                    .file_name()
+                    .unwrap_or(entry.path.as_os_str())
+                    .to_string_lossy();
+                recent.push(item(
+                    &self.actions_tx,
+                    &format!("{name} · Page {}", entry.reading.page.saturating_add(1)),
+                    Action::OpenRecent(entry.path.clone()),
+                    None,
+                ));
+            }
+        }
+        let mut clear = item(
+            &self.actions_tx,
+            "Clear history…",
+            Action::ClearHistory,
+            None,
+        )
+        .with_separator();
+        clear.enabled = !state.recent.is_empty() || !state.session.files.is_empty();
+        recent.push(clear);
+        recent.push(item(
+            &self.actions_tx,
+            &format!(
+                "{}Restore tabs on startup",
+                if state.restore_session { "✓ " } else { "" }
+            ),
+            Action::RestoreSession(!state.restore_session),
+            None,
+        ));
+
+        let current_bookmarked = viewer.is_some_and(|viewer| {
+            state.bookmarks.iter().any(|bookmark| {
+                bookmark.path == viewer.state_key()
+                    && bookmark.reading.page == viewer.reading_state().page
+            })
+        });
+        let mut toggle = item(
+            &self.actions_tx,
+            if current_bookmarked {
+                "Remove this page bookmark"
+            } else {
+                "Bookmark this page"
+            },
+            Action::ToggleBookmark,
+            Some(KeyboardShortcut {
+                key: egui::Key::B,
+                modifiers: egui::Modifiers::COMMAND,
+            }),
+        )
+        .with_separator();
+        toggle.enabled =
+            viewer.is_some() && (current_bookmarked || state.bookmarks.len() < MAX_BOOKMARKS);
+        let mut bookmarks = vec![toggle];
+        if state.bookmarks.is_empty() {
+            bookmarks.push(SubMenuItem::new("No personal bookmarks").disabled());
+        } else {
+            let mut remove = Vec::new();
+            for (index, bookmark) in state.bookmarks.iter().enumerate() {
+                let name = bookmark
+                    .path
+                    .file_name()
+                    .unwrap_or(bookmark.path.as_os_str())
+                    .to_string_lossy();
+                let label = format!("{name} · Page {}", bookmark.reading.page.saturating_add(1));
+                bookmarks.push(item(
+                    &self.actions_tx,
+                    &label,
+                    Action::OpenBookmark(bookmark.clone()),
+                    None,
+                ));
+                remove.push(item(
+                    &self.actions_tx,
+                    &label,
+                    Action::RemoveBookmark(index),
+                    None,
+                ));
+            }
+            bookmarks.push(SubMenuItem::new("Remove bookmark").with_children(remove));
+        }
+        if state.bookmarks.len() >= MAX_BOOKMARKS && !current_bookmarked {
+            bookmarks.push(SubMenuItem::new("Bookmark limit reached").disabled());
+        }
+
+        self.bar.menu_items_with_submenus[1].subitems = recent;
+        self.bar.menu_items_with_submenus[2].subitems = bookmarks;
+    }
+
     fn owns_input(&self) -> bool {
         self.bar.keyboard_navigation_active
             || self.bar.hamburger_menu_open
@@ -137,7 +252,7 @@ impl Desktop {
             file.subitems[index].enabled = document;
         }
         file.subitems[3].enabled = printable;
-        for (item, choice) in self.bar.menu_items_with_submenus[1].subitems[0]
+        for (item, choice) in self.bar.menu_items_with_submenus[3].subitems[0]
             .children
             .iter_mut()
             .zip([
@@ -232,7 +347,7 @@ mod tests {
             },
             |ui| {
                 let next = desktop.show(ui, false, false, Appearance::HighContrast, blocked);
-                result.0 = next.0.or(result.0);
+                result.0 = next.0.or(result.0.take());
                 result.1 |= next.1;
             },
         );
@@ -343,7 +458,7 @@ mod tests {
             )
             .1
         );
-        for _ in 0..2 {
+        for _ in 0..4 {
             frame(
                 &ctx,
                 &mut desktop,
@@ -447,18 +562,61 @@ mod tests {
         Appearance::HighContrast.apply(&ctx);
         let mut desktop = Desktop::default();
         frame(&ctx, &mut desktop, 900.0, vec![], false);
-        assert_eq!(desktop.bar.items_fitted.len(), 3);
-        // macOS's compact traffic lights leave room for all three menus at
+        assert_eq!(desktop.bar.items_fitted.len(), 5);
+        // macOS's compact traffic lights leave room for all five menus at
         // 240 points. Exercise overflow with a width narrow on every platform.
         frame(&ctx, &mut desktop, 160.0, vec![], false);
         assert!(desktop.bar.items_fitted.len() < 3);
-        assert_eq!(desktop.bar.menu_order.len(), 3);
+        assert_eq!(desktop.bar.menu_order.len(), 5);
         assert_eq!(desktop.bar.background_color, egui::Color32::BLACK);
         assert_eq!(desktop.bar.submenu_text_color, egui::Color32::WHITE);
         assert_eq!(
-            desktop.bar.menu_items_with_submenus[1].subitems[0].children[3].label,
+            desktop.bar.menu_items_with_submenus[3].subitems[0].children[3].label,
             "✓ High contrast"
         );
+    }
+
+    #[test]
+    fn library_menus_follow_state_and_dispatch_dynamic_entries() {
+        let mut desktop = Desktop::default();
+        let path = std::path::PathBuf::from("/tmp/guide.pdf");
+        let reading = crate::persistence::ReadingState {
+            page: 4,
+            ..Default::default()
+        };
+        let mut state = State::default();
+        state.recent.push(crate::persistence::RecentFile {
+            path: path.clone(),
+            reading: reading.clone(),
+        });
+        state.bookmarks.push(Bookmark {
+            path: path.clone(),
+            reading: reading.clone(),
+        });
+        desktop.sync_library(&state, None);
+
+        let recent = &desktop.bar.menu_items_with_submenus[1].subitems;
+        assert_eq!(recent[0].label, "guide.pdf · Page 5");
+        recent[0].callback.as_ref().unwrap()();
+        assert_eq!(
+            desktop.actions.try_recv().unwrap(),
+            Action::OpenRecent(path.clone())
+        );
+        recent.last().unwrap().callback.as_ref().unwrap()();
+        assert_eq!(
+            desktop.actions.try_recv().unwrap(),
+            Action::RestoreSession(true)
+        );
+
+        let bookmarks = &desktop.bar.menu_items_with_submenus[2].subitems;
+        assert!(!bookmarks[0].enabled);
+        assert_eq!(bookmarks[1].label, "guide.pdf · Page 5");
+        bookmarks[1].callback.as_ref().unwrap()();
+        assert_eq!(
+            desktop.actions.try_recv().unwrap(),
+            Action::OpenBookmark(Bookmark { path, reading })
+        );
+        assert_eq!(bookmarks.last().unwrap().label, "Remove bookmark");
     }
 
     #[test]

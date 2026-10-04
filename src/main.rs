@@ -4,6 +4,7 @@ mod annotations;
 mod desktop;
 mod document;
 mod forms;
+mod icons;
 mod inspection;
 mod inspector;
 mod layout;
@@ -524,6 +525,8 @@ impl ApplicationHandler<AppEvent> for App {
                 let mut library_action = None;
                 let mut tab_action = None;
                 let mut desktop_action = None;
+                let mut recent_requested = None;
+                let mut bookmark_requested = None;
                 let mut menu_active = false;
                 let unsaved_active = self.pending.is_some();
                 let mut unsaved_decision = None;
@@ -540,6 +543,8 @@ impl ApplicationHandler<AppEvent> for App {
                             && !self.native_ui.help_open
                             && !self.viewer.as_ref().is_some_and(Viewer::modal_open)
                             && !ui.input(|input| input.key_pressed(Key::F1));
+                        self.desktop
+                            .sync_library(&self.store.state, self.viewer.as_ref());
                         let (action, owns_input) = self.desktop.show(
                             ui,
                             self.viewer.is_some(),
@@ -547,7 +552,7 @@ impl ApplicationHandler<AppEvent> for App {
                             self.native_ui.appearance,
                             !library_enabled,
                         );
-                        desktop_action = action.or(desktop_action);
+                        desktop_action = action.or(desktop_action.take());
                         menu_active |= owns_input;
                         // Match modal input isolation: menu arrows and clicks
                         // must not also navigate the PDF or change tabs.
@@ -559,12 +564,14 @@ impl ApplicationHandler<AppEvent> for App {
                                 library_enabled && !menu_active,
                                 self.viewer.as_ref(),
                             );
-                            library_action = self.library.ui(
+                            if self.library.ui(
                                 ui,
                                 &mut self.store.state,
                                 self.viewer.as_ref(),
                                 library_enabled && !menu_active,
-                            );
+                            ) {
+                                library_action = Some(());
+                            }
                             let id = self.tabs.active_id().unwrap_or(0);
                             ui.push_id(("document", id), |ui| {
                                 (open_requested, quit, submit_password) = app_ui(
@@ -600,6 +607,32 @@ impl ApplicationHandler<AppEvent> for App {
                 quit |= desktop::close_requested(&output);
                 match desktop_action {
                     Some(desktop::Action::Open) => open_requested = true,
+                    Some(desktop::Action::OpenRecent(path)) => recent_requested = Some(path),
+                    Some(desktop::Action::OpenBookmark(bookmark)) => {
+                        bookmark_requested = Some(bookmark);
+                    }
+                    Some(desktop::Action::ToggleBookmark) => {
+                        if let Some(viewer) = &self.viewer {
+                            self.store.state.toggle_bookmark(
+                                viewer.state_key().to_path_buf(),
+                                viewer.reading_state(),
+                            );
+                        }
+                    }
+                    Some(desktop::Action::RemoveBookmark(index)) => {
+                        if index < self.store.state.bookmarks.len() {
+                            self.store.state.bookmarks.remove(index);
+                        }
+                    }
+                    Some(desktop::Action::ClearHistory) => {
+                        self.library.confirm_clear();
+                        renderer.window().request_redraw();
+                    }
+                    Some(desktop::Action::RestoreSession(enabled)) => {
+                        self.store.state.restore_session = enabled;
+                        self.session_cleared = false;
+                        force_save = true;
+                    }
                     Some(desktop::Action::Save(save_as)) => {
                         if let Some(viewer) = &mut self.viewer {
                             viewer.save_requested = Some(save_as);
@@ -670,6 +703,10 @@ impl ApplicationHandler<AppEvent> for App {
                     self.request_close(event_loop);
                 } else if submit_password {
                     self.submit_password();
+                } else if let Some(bookmark) = bookmark_requested {
+                    self.open_bookmark(bookmark);
+                } else if let Some(path) = recent_requested {
+                    self.open(path);
                 } else if open_requested {
                     let mut dialog = rfd::FileDialog::new()
                         .set_title("Open PDF")
@@ -702,21 +739,9 @@ impl ApplicationHandler<AppEvent> for App {
                     self.renderer.as_ref().unwrap().window().request_redraw();
                 }
                 match library_action {
-                    Some(library::Action::Open(path)) => self.open(path),
-                    Some(library::Action::Bookmark(bookmark)) => {
-                        self.open_bookmark(bookmark);
-                        if let Some(renderer) = &self.renderer {
-                            renderer.window().request_redraw();
-                        }
-                    }
-                    Some(library::Action::ClearHistory) => {
+                    Some(()) => {
                         self.store.state.clear_history();
                         self.session_cleared = true;
-                        force_save = true;
-                    }
-                    Some(library::Action::RestoreSession(enabled)) => {
-                        self.store.state.restore_session = enabled;
-                        self.session_cleared = false;
                         force_save = true;
                     }
                     None => {}
@@ -1520,7 +1545,7 @@ mod tests {
         let (_, output) = frame(&mut app, &ctx, vec![]);
         let tree = output.platform_output.accesskit_update.unwrap();
         use egui::accesskit::Role;
-        for label in ["Zoom in", "Zoom out", "Page text"] {
+        for label in ["Zoom in", "Zoom out", "Close page text"] {
             assert!(
                 tree.nodes
                     .iter()

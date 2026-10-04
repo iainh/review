@@ -49,6 +49,10 @@ def find(name, role=None):
 
 
 def click(name, role="push button"):
+    if name in {"Rotate left", "Rotate right", "Select text", "Hand tool"} and not named(name, role):
+        click("Reading options")
+    if name == "Annotations" and not named(name, role):
+        click("Tools")
     action = find(name, role).queryAction()
     assert action.nActions and action.doAction(0), name
     time.sleep(.4)
@@ -110,10 +114,8 @@ def capture(name):
 
 
 def layout(name):
-    click("Layout", "combo box")
+    click("Reading options")
     click(name)
-    # AT-SPI activation changes the value without a pointer-up closing the popup.
-    key("Escape")
 
 
 def zoom(percent):
@@ -130,7 +132,7 @@ def open_pdf(name):
     process = subprocess.Popen([binary, f"{fixtures}/{name}.pdf"],
                                env={**{k: v for k, v in os.environ.items() if k != "DISPLAY"},
                                     "XDG_STATE_HOME": state_home})
-    find("Layout", "combo box")
+    find("Reading options", "push button")
     assert window()["shell"] == "xdg_shell"
     time.sleep(.8)
     click("Sidebar")

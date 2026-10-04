@@ -45,7 +45,20 @@ expect_state() {
     cat "$state" >&2; exit 1
 }
 key() { wtype -s 150 -k "$1" -s 150; }
+command() { wtype -s 150 -M ctrl -k "$1" -m ctrl -s 150; }
 bookmark() { wtype -s 150 -M ctrl -k b -m ctrl -s 150; }
+open_menu() {
+    local rights=$1
+    command F2
+    for ((i = 0; i < rights; i++)); do key Right; done
+    key Return
+}
+menu_action() {
+    local rights=$1 downs=$2
+    open_menu "$rights"
+    for ((i = 0; i < downs; i++)); do key Down; done
+    key Return
+}
 capture() {
     if [[ -n ${REVIEW_SCREENSHOTS:-} ]]; then
         mkdir -p "$REVIEW_SCREENSHOTS"
@@ -79,8 +92,7 @@ expect_title 'Review — outline.pdf — 2/2 — Fit width'
 close
 launch outline.pdf
 expect_title 'Review — outline.pdf — 2/2 — Fit width'
-"$scratch/pointer" click 156 12
-"$scratch/pointer" click 175 63
+menu_action 2 1
 expect_title 'Review — outline.pdf — 2/2 — 600%'
 "$scratch/pointer" click 800 450
 key F9
@@ -95,23 +107,23 @@ wtype -s 150 -M ctrl -k g -m ctrl -s 150 '1' -s 150 -k Return -s 150
 "$scratch/pointer" click 800 450
 key 0
 expect_title 'Review — outline.pdf — 1/2 — Fit page'
-"$scratch/pointer" click 156 12
+open_menu 2
 capture personal-bookmarks
-"$scratch/pointer" click 175 63
+key Down
+key Return
 expect_title 'Review — outline.pdf — 2/2 — 600%'
 expect_state ".recent[0].reading == $(cat "$scratch/reading.json")"
 echo 'PASS: restart restores page, zoom, scroll, sidebar visibility/width/tab; bookmark restores its location'
 close
 launch
 expect_title Review
-"$scratch/pointer" click 45 12
+open_menu 1
 capture recent-files
-"$scratch/pointer" click 70 36
+key Return
 expect_title 'Review — outline.pdf — 2/2 — 600%'
-"$scratch/pointer" click 45 12
-"$scratch/pointer" click 70 64
+menu_action 1 1
 capture clear-history-confirmation
-"$scratch/pointer" click 63 117
+key Return
 expect_state '(.recent | length) == 0 and (.bookmarks | length) == 1'
 key Left
 expect_state '(.recent | length) == 0'
