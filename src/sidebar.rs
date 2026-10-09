@@ -73,11 +73,18 @@ impl Sidebar {
             .default_size(self.width)
             .size_range(200.0..=400.0)
             .resizable(true)
+            .frame(egui::Frame::side_top_panel(root.style()).fill(root.visuals().faint_bg_color))
             .show_inside(root, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.pages, false, "Outline");
-                    ui.selectable_value(&mut self.pages, true, "Pages");
-                });
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        crate::native_ui::panel_bevel(ui);
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut self.pages, false, "Outline");
+                            ui.selectable_value(&mut self.pages, true, "Pages");
+                        });
+                    });
                 ui.separator();
                 if self.pages {
                     destination = self

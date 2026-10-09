@@ -531,6 +531,7 @@ impl Viewer {
         )));
 
         egui::Panel::top("toolbar").show_inside(root, |ui| {
+            crate::native_ui::panel_bevel(ui);
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.visuals_mut().disabled_alpha = 0.65;
             ui.horizontal_wrapped(|ui| {
@@ -995,8 +996,10 @@ impl Viewer {
             _ => {}
         }
         let mut page_edited = false;
-        egui::CentralPanel::default().show_inside(root, |ui| {
-            if !shortcuts {
+        let frame = egui::Frame::central_panel(root.style()).fill(root.visuals().faint_bg_color);
+        let panel = egui::CentralPanel::default().frame(frame);
+        panel.show_inside(root, |ui| {
+            if !shortcuts && ui.is_enabled() {
                 ui.disable();
             }
             let available = ui.available_size();

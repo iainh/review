@@ -598,7 +598,12 @@ impl ApplicationHandler<AppEvent> for App {
                         // must not also navigate the PDF or change tabs.
                         let menu_events =
                             menu_active.then(|| ctx.input_mut(|i| std::mem::take(&mut i.events)));
+                        let content_opacity = ui.opacity();
                         ui.add_enabled_ui(!menu_active, |ui| {
+                            // Menus lock input without dimming the document like a modal.
+                            if menu_active {
+                                ui.set_opacity(content_opacity);
+                            }
                             tab_action = self.tabs.ui(
                                 ui,
                                 library_enabled && !menu_active,
@@ -922,17 +927,37 @@ fn app_ui(
     if let Some(viewer) = viewer {
         viewer.ui(root, &mut open_requested);
     } else {
-        egui::CentralPanel::default().show_inside(root, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(((ui.available_height() - 90.0) * 0.5).max(0.0));
-                ui.heading("Review");
-                ui.label("Open a PDF to get started");
-                if ui.button("Open…").clicked() {
-                    open_requested = true;
-                }
-                ui.label("Ctrl+O / Cmd+O, or drop a PDF here");
+        let frame = egui::Frame::central_panel(root.style()).fill(root.visuals().faint_bg_color);
+        egui::CentralPanel::default()
+            .frame(frame)
+            .show_inside(root, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(((ui.available_height() - 190.0) * 0.5).max(0.0));
+                    ui.label(
+                        egui::RichText::new(char::from(icons::Icon::FileText).to_string())
+                            .size(40.0)
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                    ui.add_space(14.0);
+                    ui.label(egui::RichText::new("No document open").size(20.0));
+                    ui.add_space(8.0);
+                    ui.weak("Open a PDF, or drop one anywhere in this window.");
+                    ui.add_space(16.0);
+                    if native_ui::studio_button(
+                        ui,
+                        egui::Button::new("Open…")
+                            .selected(true)
+                            .min_size(egui::vec2(110.0, 30.0)),
+                        true,
+                    )
+                    .clicked()
+                    {
+                        open_requested = true;
+                    }
+                    ui.add_space(8.0);
+                    ui.weak("Ctrl+O / Cmd+O");
+                });
             });
-        });
     }
     if let Some(error) = open_error.as_ref() {
         let mut dismiss = false;

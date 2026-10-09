@@ -48,13 +48,14 @@ pub fn selectable_button(
     label: &'static str,
     selected: bool,
 ) -> Response {
-    let response = ui
-        .add(
-            egui::Button::new(text(icon))
-                .selected(selected)
-                .min_size(egui::vec2(30.0, 30.0)),
-        )
-        .on_hover_text(label);
+    let response = crate::native_ui::studio_button(
+        ui,
+        egui::Button::new(text(icon))
+            .selected(selected)
+            .min_size(egui::vec2(30.0, 30.0)),
+        selected,
+    )
+    .on_hover_text(label);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
     response
 }

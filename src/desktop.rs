@@ -288,7 +288,11 @@ impl Desktop {
         } else {
             visuals.widgets.hovered.bg_fill
         };
-        self.bar.background_color = visuals.panel_fill;
+        self.bar.background_color = if visuals.dark_mode && appearance != Appearance::HighContrast {
+            egui::Color32::from_gray(30)
+        } else {
+            visuals.panel_fill
+        };
         self.bar.title_color = foreground;
         self.bar.menu_text_color = foreground;
         self.bar.close_icon_color = foreground;
@@ -305,7 +309,11 @@ impl Desktop {
         self.bar.submenu_shortcut_color = foreground;
         self.bar.submenu_border_color = visuals.widgets.noninteractive.bg_stroke.color;
         self.bar.submenu_keyboard_selection_color = visuals.selection.bg_fill;
+        // Panels meet edge to edge; the input scope must not add a widget gap.
+        let vertical_spacing = root.spacing().item_spacing.y;
+        root.spacing_mut().item_spacing.y = 0.0;
         root.add_enabled_ui(!blocked, |ui| self.bar.show(ui));
+        root.spacing_mut().item_spacing.y = vertical_spacing;
         let owns_input = was_open || self.owns_input();
         let action = self.actions.try_iter().last();
         if action.is_some() {

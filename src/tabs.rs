@@ -211,61 +211,272 @@ impl Tabs {
         // and its close action visible even with a single tab.
         if !self.entries.is_empty() {
             let reveal = std::mem::take(&mut self.reveal_active);
-            egui::Panel::top("document_tabs").show_inside(root, |ui| {
-                if !enabled {
-                    ui.disable();
-                }
-                egui::ScrollArea::horizontal()
-                    .id_salt("tab_strip")
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for tab in &self.entries {
-                                ui.push_id(tab.id, |ui| {
-                                    let name = tab
-                                        .file
-                                        .path
-                                        .file_name()
-                                        .unwrap_or(tab.file.path.as_os_str())
-                                        .to_string_lossy();
-                                    let unopened = tab.viewer.is_none()
-                                        && (Some(tab.id) != self.active_id() || !has_viewer);
-                                    let label = if unopened {
-                                        format!("{name} (not opened)")
-                                    } else if self.is_dirty(tab.id, viewer) {
-                                        format!("{name} *")
-                                    } else {
-                                        name.into_owned()
-                                    };
-                                    let selected = ui
-                                        .selectable_label(Some(tab.id) == self.active_id(), label)
-                                        .on_hover_text(tab.file.path.display().to_string());
-                                    if reveal && Some(tab.id) == self.active_id() {
-                                        selected.scroll_to_me(Some(egui::Align::Center));
-                                    }
-                                    if selected.clicked() {
-                                        action = Some(Action::Select(tab.id));
-                                    }
-                                    if ui
-                                        .small_button("×")
-                                        .on_hover_text("Close document")
-                                        .clicked()
-                                    {
-                                        action = Some(Action::Close(tab.id));
-                                    }
-                                    ui.separator();
-                                });
-                            }
+            let frame = egui::Frame::new().fill(root.visuals().window_fill);
+            egui::Panel::top("document_tabs")
+                .frame(frame)
+                .show_inside(root, |ui| {
+                    if !enabled && ui.is_enabled() {
+                        ui.disable();
+                    }
+                    egui::ScrollArea::horizontal()
+                        .id_salt("tab_strip")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.horizontal(|ui| {
+                                for tab in &self.entries {
+                                    ui.push_id(tab.id, |ui| {
+                                        let name = tab
+                                            .file
+                                            .path
+                                            .file_name()
+                                            .unwrap_or(tab.file.path.as_os_str())
+                                            .to_string_lossy();
+                                        let unopened = tab.viewer.is_none()
+                                            && (Some(tab.id) != self.active_id() || !has_viewer);
+                                        let label = if unopened {
+                                            format!("{name} (not opened)")
+                                        } else {
+                                            name.into_owned()
+                                        };
+                                        let active = Some(tab.id) == self.active_id();
+                                        let (selected, close) = document_tab(
+                                            ui,
+                                            &label,
+                                            active,
+                                            self.is_dirty(tab.id, viewer),
+                                        );
+                                        let selected = selected
+                                            .on_hover_text(tab.file.path.display().to_string());
+                                        if reveal && active {
+                                            ui.scroll_to_rect(
+                                                selected.rect.union(close.rect),
+                                                Some(egui::Align::Center),
+                                            );
+                                        }
+                                        if selected.clicked() {
+                                            action = Some(Action::Select(tab.id));
+                                        }
+                                        if close.clicked() {
+                                            action = Some(Action::Close(tab.id));
+                                        }
+                                    });
+                                }
+                            });
                         });
-                    });
-            });
+                });
         }
         action
     }
 }
 
+/// Flat document tab with independent native selection and close controls.
+fn document_tab(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: bool,
+    dirty: bool,
+) -> (egui::Response, egui::Response) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let text_width = ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(label.into(), font, ui.visuals().text_color())
+            .size()
+            .x
+    });
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2((text_width + 60.0).clamp(160.0, 260.0), 36.0),
+        egui::Sense::hover(),
+    );
+    let background = ui.painter().add(egui::Shape::Noop);
+    let close_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - 18.0, rect.center().y),
+        egui::vec2(26.0, 26.0),
+    );
+    let mut label_rect = rect.shrink2(egui::vec2(8.0, 3.0));
+    label_rect.max.x = close_rect.left() - if dirty { 16.0 } else { 4.0 };
+    let selected = ui.put(
+        label_rect,
+        egui::Button::selectable(
+            active,
+            egui::RichText::new(label).color(if active {
+                ui.visuals().text_color()
+            } else {
+                ui.visuals().weak_text_color()
+            }),
+        )
+        .frame(false)
+        .truncate(),
+    );
+    selected.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            active,
+            if dirty {
+                format!("{label} (unsaved changes)")
+            } else {
+                label.into()
+            },
+        )
+    });
+    let close = ui
+        .put(
+            close_rect,
+            egui::Button::new(
+                egui::RichText::new(char::from(crate::icons::Icon::X).to_string()).size(14.0),
+            )
+            .frame_when_inactive(false)
+            .corner_radius(4),
+        )
+        .on_hover_text(format!("Close {label}"));
+    close.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            format!("Close {label}"),
+        )
+    });
+    let fill = if active {
+        ui.visuals().faint_bg_color
+    } else if selected.hovered() || close.hovered() {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        ui.visuals().window_fill
+    };
+    ui.painter()
+        .set(background, egui::Shape::rect_filled(rect, 0, fill));
+    let accent = if ui.visuals().panel_fill == egui::Color32::BLACK {
+        ui.visuals().selection.stroke.color
+    } else {
+        ui.visuals().selection.bg_fill
+    };
+    if dirty {
+        ui.painter().circle_filled(
+            egui::pos2(close_rect.left() - 8.0, rect.center().y),
+            3.0,
+            accent,
+        );
+    }
+    if active {
+        ui.painter().hline(
+            (rect.left() + 8.0)..=(rect.right() - 8.0),
+            rect.bottom() - 2.0,
+            egui::Stroke::new(2.0_f32, accent),
+        );
+    }
+    if selected.has_focus() {
+        ui.painter().rect_stroke(
+            rect.shrink(2.0),
+            2,
+            egui::Stroke::new(2.0_f32, accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.painter().vline(
+        rect.right() - 0.5,
+        (rect.top() + 10.0)..=(rect.bottom() - 10.0),
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+    (selected, close)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tabs_keep_full_accessible_names_and_independent_selection_and_close_targets() {
+        let mut tabs = Tabs::default();
+        let long_name = "Quarterly financial report with supporting schedules and notes.pdf";
+        tabs.restore(&Session {
+            files: ["Brief.pdf", long_name]
+                .map(|name| SessionFile {
+                    path: Path::new("/documents").join(name),
+                    reading: Default::default(),
+                    sidebar: Default::default(),
+                })
+                .into(),
+            active: 0,
+        });
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut draw = |events, enabled| {
+            let mut action = None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(700.0, 300.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| action = tabs.ui(ui, enabled, None),
+            );
+            (action, output)
+        };
+        let (_, output) = draw(vec![], true);
+        let tree = output.platform_output.accesskit_update.unwrap();
+        let name = format!("{long_name} (not opened)");
+        let selection = &tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some(name.as_str()))
+            .unwrap()
+            .1;
+        assert_eq!(selection.toggled(), Some(egui::accesskit::Toggled::False));
+        let close = &tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some(format!("Close {name}").as_str()))
+            .unwrap()
+            .1;
+        let centre = |node: &egui::accesskit::Node| {
+            let bounds = node.bounds().unwrap();
+            egui::pos2(
+                ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                ((bounds.y0 + bounds.y1) / 2.0) as f32,
+            )
+        };
+        let select_position = centre(selection);
+        let close_position = centre(close);
+        assert!(
+            !selection
+                .bounds()
+                .unwrap()
+                .contains(egui::accesskit::Point::new(
+                    close_position.x as f64,
+                    close_position.y as f64
+                ))
+        );
+        let click = |position| {
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        assert!(matches!(
+            draw(click(select_position), true).0,
+            Some(Action::Select(1))
+        ));
+        assert!(matches!(
+            draw(click(close_position), true).0,
+            Some(Action::Close(1))
+        ));
+        assert!(draw(click(close_position), false).0.is_none());
+    }
 
     #[test]
     fn shortcuts_wrap_and_modal_tabs_do_not_consume_close_or_switch() {
