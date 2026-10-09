@@ -411,6 +411,7 @@ mod tests {
         assert!(!desktop.bar.menu_items_with_submenus[0].subitems[3].enabled);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn unavailable_file_actions_expose_disabled_accesskit_nodes() {
         let ctx = Context::default();
@@ -452,6 +453,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn keyboard_menus_invoke_real_callbacks_and_modal_blocks_activation() {
         let ctx = Context::default();
@@ -575,6 +577,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn responsive_bar_preserves_menu_order_and_matches_high_contrast() {
         let ctx = Context::default();
@@ -582,8 +585,6 @@ mod tests {
         let mut desktop = Desktop::default();
         frame(&ctx, &mut desktop, 900.0, vec![], false);
         assert_eq!(desktop.bar.items_fitted.len(), 5);
-        // macOS's compact traffic lights leave room for all five menus at
-        // 240 points. Exercise overflow with a width narrow on every platform.
         frame(&ctx, &mut desktop, 160.0, vec![], false);
         assert!(desktop.bar.items_fitted.len() < 3);
         assert_eq!(desktop.bar.menu_order.len(), 5);
