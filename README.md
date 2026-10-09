@@ -257,6 +257,11 @@ hand the PDF to another application.
 
 ## Accessibility and appearance
 
+UI text uses the macOS system font (San Francisco), Segoe UI on Windows and
+Fontconfig's preferred sans-serif font on Linux. Bundled fonts remain as
+fallbacks when the system font is unavailable or lacks a glyph. Toolbar icons
+keep their own font, and PDF page fonts are unchanged.
+
 The desktop titlebar provides native window controls, dragging and edge resizing.
 On macOS, **File**, **Recent**, **Bookmarks**, **View** and **Help** are in the
 system menu bar; on Linux and Windows they are in the titlebar. Document tabs

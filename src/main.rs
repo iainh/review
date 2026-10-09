@@ -3,6 +3,7 @@
 mod annotations;
 mod desktop;
 mod document;
+mod fonts;
 mod forms;
 mod icons;
 mod inspection;
