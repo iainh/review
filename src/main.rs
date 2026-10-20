@@ -11,6 +11,7 @@ mod inspector;
 mod layout;
 mod library;
 mod links;
+mod loading;
 #[cfg(target_os = "macos")]
 mod macos;
 mod native_ui;
@@ -42,7 +43,7 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     window::{Icon, Window, WindowId},
 };
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 fn app_icon() -> Icon {
     let image = image::load_from_memory(include_bytes!("../assets/review-256.png"))
@@ -98,7 +99,9 @@ struct App {
     state_error: Option<String>,
     open_error: Option<String>,
     password_prompt: Option<PasswordPrompt>,
+    loading: Option<loading::Load>,
     renderer: Option<Renderer>,
+    has_drawn: bool,
     repaint_at: Option<Instant>,
     fatal_error: Option<anyhow::Error>,
     proxy: Option<EventLoopProxy<AppEvent>>,
@@ -126,7 +129,9 @@ impl App {
             state_error,
             open_error: None,
             password_prompt: None,
+            loading: None,
             renderer: None,
+            has_drawn: false,
             repaint_at: None,
             fatal_error: None,
             proxy: None,
@@ -151,19 +156,57 @@ impl App {
     }
 
     fn open_unchecked(&mut self, path: PathBuf, reading: Option<persistence::ReadingState>) {
+        self.loading = None;
         self.password_prompt = None;
         self.open_error = None;
-        let key = persistence::file_key(&path);
-        if let Some(id) = self.tabs.find(&key)
+        // Common exact-path duplicates need no file access. Canonicalization
+        // and alias deduplication happen on completion, off the UI thread.
+        if self.focus_open(&path, reading.as_ref()) {
+            return;
+        }
+        self.loading = Some(loading::Load::start(
+            path,
+            reading,
+            None,
+            self.proxy.clone(),
+        ));
+        self.tab_changed();
+    }
+
+    fn focus_open(
+        &mut self,
+        key: &std::path::Path,
+        reading: Option<&persistence::ReadingState>,
+    ) -> bool {
+        if let Some(id) = self.tabs.find(key)
             && self.tabs.select(id, &mut self.viewer)
         {
             self.session_cleared = false;
             let viewer = self.viewer.as_mut().unwrap();
-            if let Some(reading) = &reading {
+            if let Some(reading) = reading {
                 viewer.restore_reading(reading);
             }
-            self.store.state.opened(key, viewer.reading_state());
+            self.store
+                .state
+                .opened(key.to_path_buf(), viewer.reading_state());
             self.tab_changed();
+            return true;
+        }
+        false
+    }
+
+    fn poll_loading(&mut self) {
+        let Some(load) = &self.loading else { return };
+        let (key, result) = match load.receiver.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => (
+                load.path.clone(),
+                Err("PDF loader stopped unexpectedly".into()),
+            ),
+        };
+        let mut load = self.loading.take().unwrap();
+        if self.focus_open(&key, load.reading.as_ref()) {
             return;
         }
         if self.tabs.find(&key).is_none() && self.tabs.len() >= persistence::MAX_SESSION {
@@ -173,22 +216,26 @@ impl App {
             self.tab_changed();
             return;
         }
-        match document::PdfDocument::open_with_password(&path, None) {
-            Ok(Some(document)) => self.finish_open(document, reading.as_ref()),
+        match result {
+            Ok(Some(loaded)) => match loaded.open() {
+                Ok((document, metadata)) => self.finish_open(
+                    Viewer::with_metadata(document, metadata),
+                    load.reading.as_ref(),
+                ),
+                Err(error) => self.open_error = Some(format!("{error:#}")),
+            },
             Ok(None) => {
                 self.password_prompt = Some(PasswordPrompt {
-                    path,
+                    path: load.path.clone(),
                     input: Zeroizing::new(String::new()),
-                    incorrect: false,
+                    incorrect: load.password_attempt,
                     focus: true,
-                    reading,
+                    reading: load.reading.take(),
                 })
             }
-            Err(error) => self.open_error = Some(format!("{error:#}")),
+            Err(error) => self.open_error = Some(error),
         }
-        if let Some(renderer) = &self.renderer {
-            renderer.window().request_redraw();
-        }
+        self.tab_changed();
     }
 
     fn request_close(&mut self, event_loop: &ActiveEventLoop) {
@@ -201,6 +248,7 @@ impl App {
         if self.pending.is_some() {
             return false;
         }
+        self.loading = None;
         self.password_prompt = None;
         self.capture_state();
         let dirty: VecDeque<_> = self.tabs.dirty_ids(self.viewer.as_ref()).into();
@@ -251,32 +299,20 @@ impl App {
     }
 
     fn submit_password(&mut self) {
-        let Some(mut prompt) = self.password_prompt.take() else {
+        let Some(prompt) = self.password_prompt.take() else {
             return;
         };
-        let result = document::PdfDocument::open_with_password(&prompt.path, Some(&prompt.input));
-        prompt.input.zeroize();
-        match result {
-            Ok(Some(document)) => self.finish_open(document, prompt.reading.as_ref()),
-            Ok(None) => {
-                prompt.incorrect = true;
-                prompt.focus = true;
-                self.password_prompt = Some(prompt);
-            }
-            Err(error) => self.open_error = Some(format!("{error:#}")),
-        }
-        if let Some(renderer) = &self.renderer {
-            renderer.window().request_redraw();
-        }
+        self.loading = Some(loading::Load::start(
+            prompt.path,
+            prompt.reading,
+            Some(prompt.input),
+            self.proxy.clone(),
+        ));
+        self.tab_changed();
     }
 
-    fn finish_open(
-        &mut self,
-        document: document::PdfDocument,
-        bookmark: Option<&persistence::ReadingState>,
-    ) {
+    fn finish_open(&mut self, mut viewer: Viewer, bookmark: Option<&persistence::ReadingState>) {
         self.capture_state();
-        let mut viewer = Viewer::new(document);
         let restored = self
             .tabs
             .find(viewer.state_key())
@@ -309,6 +345,8 @@ impl App {
     }
 
     fn select_tab(&mut self, id: u64) {
+        self.loading = None;
+        self.password_prompt = None;
         if self.tabs.select(id, &mut self.viewer) {
             self.open_error = None;
             self.tab_changed();
@@ -321,6 +359,8 @@ impl App {
         if self.pending.is_some() {
             return;
         }
+        self.loading = None;
+        self.password_prompt = None;
         if self.tabs.is_dirty(id, self.viewer.as_ref()) {
             self.select_tab(id);
             self.pending = Some(PendingAction::CloseTab(id));
@@ -351,6 +391,8 @@ impl App {
         if let Some(viewer) = &mut self.viewer
             && viewer.state_key() == bookmark.path
         {
+            self.loading = None;
+            self.password_prompt = None;
             viewer.restore_reading(&bookmark.reading);
         } else {
             self.open_with_reading(bookmark.path, Some(bookmark.reading));
@@ -624,6 +666,7 @@ impl ApplicationHandler<AppEvent> for App {
                                     &mut self.viewer,
                                     &mut self.open_error,
                                     &mut self.password_prompt,
+                                    &mut self.loading,
                                     ui,
                                     &mut self.native_ui,
                                 );
@@ -734,6 +777,8 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 if let Err(error) = renderer.render(output) {
                     eprintln!("failed to draw frame: {error:#}");
+                } else {
+                    self.has_drawn = true;
                 }
                 if let Some(viewer) = &mut self.viewer {
                     viewer.print_if_requested(renderer.window());
@@ -809,6 +854,10 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Present the shell before doing the remaining UI-owned document parse.
+        if self.has_drawn {
+            self.poll_loading();
+        }
         self.save_state(false);
         let deadline = self
             .repaint_at
@@ -831,6 +880,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.loading = None;
         self.save_state(true);
         // Drop/join egui's clipboard worker before winit destroys the display.
         self.renderer = None;
@@ -841,6 +891,7 @@ fn app_ui(
     viewer: &mut Option<Viewer>,
     open_error: &mut Option<String>,
     password_prompt: &mut Option<PasswordPrompt>,
+    loading: &mut Option<loading::Load>,
     root: &mut egui::Ui,
     native_ui: &mut native_ui::NativeUi,
 ) -> (bool, bool, bool) {
@@ -925,6 +976,32 @@ fn app_ui(
     if blocked {
         root.disable();
     }
+    if let Some(load) = loading.as_ref() {
+        let mut cancel = !blocked
+            && !viewer.as_ref().is_some_and(Viewer::modal_open)
+            && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
+        egui::Panel::top("loading_pdf").show_inside(root, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                cancel |= ui.button("Cancel loading").clicked();
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.spinner();
+                    ui.add(
+                        egui::Label::new(format!(
+                            "Loading PDF: {}",
+                            load.path
+                                .file_name()
+                                .unwrap_or(load.path.as_os_str())
+                                .to_string_lossy()
+                        ))
+                        .truncate(),
+                    );
+                });
+            });
+        });
+        if cancel {
+            *loading = None;
+        }
+    }
     if let Some(viewer) = viewer {
         viewer.ui(root, &mut open_requested);
     } else {
@@ -932,6 +1009,9 @@ fn app_ui(
         egui::CentralPanel::default()
             .frame(frame)
             .show_inside(root, |ui| {
+                if loading.is_some() {
+                    return;
+                }
                 ui.vertical_centered(|ui| {
                     ui.add_space(((ui.available_height() - 190.0) * 0.5).max(0.0));
                     ui.label(
@@ -1084,6 +1164,110 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    impl App {
+        fn wait_for_load(&mut self) {
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            while self.loading.is_some() {
+                assert!(Instant::now() < deadline, "PDF load timed out");
+                self.poll_loading();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+
+    #[test]
+    fn background_open_preserves_current_view_and_discards_superseded_or_cancelled_loads() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let paths = ["current.pdf", "superseded.pdf", "newest.pdf"].map(|name| {
+            let path = root.join(name);
+            std::fs::write(&path, document::tests::sample_pdf("", false)).unwrap();
+            path
+        });
+        let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
+        app.open(paths[0].clone());
+        assert!(app.viewer.is_none());
+        app.wait_for_load();
+        let current = app.tabs.active_id().unwrap();
+        app.open(paths[1].clone());
+        assert_eq!(app.viewer.as_ref().unwrap().path(), paths[0]);
+        app.open(paths[2].clone());
+        app.wait_for_load();
+        assert_eq!(app.viewer.as_ref().unwrap().path(), paths[2]);
+        assert_eq!(app.tabs.len(), 2);
+        assert!(app.tabs.find(&paths[1]).is_none());
+
+        // Selecting an existing tab supersedes a pending load, without a late
+        // result stealing focus or adding the unwanted document to the session.
+        app.open(paths[1].clone());
+        app.select_tab(current);
+        app.poll_loading();
+        assert_eq!(app.viewer.as_ref().unwrap().path(), paths[0]);
+        assert!(app.loading.is_none());
+
+        app.open(paths[1].clone());
+        let ctx = egui::Context::default();
+        password_frame(
+            &mut app,
+            &ctx,
+            vec![key_event(Key::Escape, Modifiers::NONE)],
+        );
+        app.poll_loading();
+        assert!(app.loading.is_none());
+        assert_eq!(app.viewer.as_ref().unwrap().path(), paths[0]);
+        assert_eq!(app.tabs.len(), 2);
+        assert!(app.tabs.find(&paths[1]).is_none());
+
+        app.open(paths[1].clone());
+        assert!(app.begin_close());
+        app.poll_loading();
+        assert!(app.loading.is_none());
+        assert_eq!(app.tabs.len(), 2);
+    }
+
+    #[test]
+    fn empty_state_is_hidden_until_pending_load_is_cancelled() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
+        app.open(directory.path().join("pending.pdf"));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let (_, output) = password_frame(&mut app, &ctx, vec![]);
+        let nodes = output.platform_output.accesskit_update.unwrap().nodes;
+        assert!(
+            nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some("Cancel loading"))
+        );
+        assert!(
+            !nodes
+                .iter()
+                .any(|(_, node)| node.value() == Some("No document open"))
+        );
+        assert!(
+            !nodes.iter().any(|(_, node)| node.value()
+                == Some("Open a PDF, or drop one anywhere in this window."))
+        );
+
+        password_frame(
+            &mut app,
+            &ctx,
+            vec![key_event(Key::Escape, Modifiers::NONE)],
+        );
+        let (_, output) = password_frame(&mut app, &ctx, vec![]);
+        let nodes = output.platform_output.accesskit_update.unwrap().nodes;
+        assert!(
+            nodes
+                .iter()
+                .any(|(_, node)| node.value() == Some("No document open"))
+        );
+        assert!(
+            !nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some("Cancel loading"))
+        );
+    }
+
     #[test]
     #[ignore = "reopens native tab-close output from REVIEW_FIXTURE_DIR"]
     fn verify_native_tab_close_output() {
@@ -1121,6 +1305,7 @@ mod tests {
         let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
         app.viewer = Some(Viewer::new(document));
         app.open(replacement.clone());
+        app.wait_for_load();
         assert!(app.pending.is_none());
         assert_eq!(app.tabs.len(), 2);
         let source_id = app.tabs.find(&source).unwrap();
@@ -1131,6 +1316,7 @@ mod tests {
         assert!(app.pending.is_none());
         assert!(app.viewer.as_ref().unwrap().is_dirty());
         app.open(replacement.clone());
+        app.wait_for_load();
         app.close_tab(source_id);
         let original_permissions = std::fs::metadata(&source).unwrap().permissions();
         let mut permissions = original_permissions.clone();
@@ -1197,6 +1383,7 @@ mod tests {
                 reading: reading.clone(),
             };
             app.open_bookmark(bookmark.clone());
+            app.wait_for_load();
             assert!(app.pending.is_none());
             if encrypted {
                 assert_eq!(app.viewer.as_ref().unwrap().path(), source);
@@ -1211,6 +1398,7 @@ mod tests {
                     .input
                     .push_str("open-secret");
                 app.submit_password();
+                app.wait_for_load();
             }
             let viewer = app.viewer.as_ref().unwrap();
             assert_eq!(viewer.path(), target);
@@ -1222,6 +1410,7 @@ mod tests {
             let mut bookmark = bookmark;
             bookmark.reading.page = 0;
             app.open_bookmark(bookmark.clone());
+            app.wait_for_load();
             assert_eq!(
                 app.viewer.as_ref().unwrap().reading_state(),
                 bookmark.reading
@@ -1257,7 +1446,7 @@ mod tests {
                     )
                     .unwrap();
             }
-            app.finish_open(document, None);
+            app.finish_open(Viewer::new(document), None);
             ids.push(app.tabs.active_id().unwrap());
         }
         app.password_prompt = Some(PasswordPrompt {
@@ -1331,6 +1520,7 @@ mod tests {
                     &mut app.viewer,
                     &mut app.open_error,
                     &mut app.password_prompt,
+                    &mut app.loading,
                     ui,
                     &mut app.native_ui,
                 )
@@ -1363,6 +1553,7 @@ mod tests {
         let title = app.viewer.as_ref().unwrap().title();
         assert!(title.ends_with("2/2 — 125%"));
         app.open(path.clone());
+        app.wait_for_load();
         assert!(app.password_prompt.is_some());
         assert!(app.open_error.is_none());
         password_frame(&mut app, &ctx, vec![]);
@@ -1383,6 +1574,7 @@ mod tests {
             password_frame(&mut app, &ctx, vec![key_event(Key::Enter, Modifiers::NONE)]);
         assert!(action.2);
         app.submit_password();
+        app.wait_for_load();
         assert!(app.password_prompt.as_ref().unwrap().incorrect);
         assert!(app.password_prompt.as_ref().unwrap().input.is_empty());
         assert_eq!(app.viewer.as_ref().unwrap().title(), title);
@@ -1398,12 +1590,14 @@ mod tests {
         assert!(app.password_prompt.is_none());
         assert_eq!(app.viewer.as_ref().unwrap().title(), title);
         app.open(path);
+        app.wait_for_load();
         app.password_prompt
             .as_mut()
             .unwrap()
             .input
             .push_str("open-secret");
         app.submit_password();
+        app.wait_for_load();
         assert!(app.password_prompt.is_none());
         assert!(app.open_error.is_none());
         assert_eq!(
@@ -1481,16 +1675,19 @@ mod tests {
         let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
         app.viewer = Some(Viewer::new(document::tests::sample_document()));
         app.open(path.clone());
+        app.wait_for_load();
         app.password_prompt
             .as_mut()
             .unwrap()
             .input
             .push_str("secret\0tail");
         app.submit_password();
+        app.wait_for_load();
         assert!(app.password_prompt.is_none());
         assert!(!app.open_error.as_ref().unwrap().contains("secret"));
         assert!(app.viewer.as_ref().unwrap().title().contains("sample.pdf"));
         app.open(path);
+        app.wait_for_load();
         app.password_prompt
             .as_mut()
             .unwrap()
@@ -1499,6 +1696,7 @@ mod tests {
         let replacement = directory.path().join("replacement.pdf");
         std::fs::write(&replacement, document::tests::sample_pdf("", false)).unwrap();
         app.open(replacement);
+        app.wait_for_load();
         assert!(app.password_prompt.is_none());
         assert!(app.open_error.is_none());
         assert!(
@@ -1744,6 +1942,7 @@ mod tests {
         app.viewer.as_mut().unwrap().restore_reading(&location);
         let saved_state = app.store.state.clone();
         app.open("/missing/review-no-such-file.pdf".into());
+        app.wait_for_load();
         assert!(
             app.open_error
                 .as_ref()
@@ -1762,6 +1961,7 @@ mod tests {
             let path = directory.path().join(name);
             std::fs::write(&path, bytes).unwrap();
             app.open(path);
+            app.wait_for_load();
             assert!(app.open_error.is_some(), "{name} must be rejected");
             assert!(app.password_prompt.is_none());
             assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
@@ -1787,6 +1987,7 @@ mod tests {
                     &mut app.viewer,
                     &mut app.open_error,
                     &mut app.password_prompt,
+                    &mut app.loading,
                     ui,
                     &mut app.native_ui,
                 ),
@@ -1822,6 +2023,7 @@ mod tests {
                 &mut app.viewer,
                 &mut app.open_error,
                 &mut app.password_prompt,
+                &mut app.loading,
                 ui,
                 &mut app.native_ui,
             );
@@ -1831,6 +2033,7 @@ mod tests {
         std::fs::write(&path, document::tests::sample_pdf("", false)).unwrap();
         app.open_error = Some("previous error".into());
         app.open(path);
+        app.wait_for_load();
         assert_eq!(
             app.viewer.as_ref().unwrap().title(),
             "Review — new document.pdf — 1/2 — Fit page"
@@ -1855,6 +2058,7 @@ mod tests {
         };
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         app.open(path.clone());
+        app.wait_for_load();
         app.viewer.as_mut().unwrap().restore_reading(&location);
         app.viewer.as_mut().unwrap().restore_sidebar(&SidebarState {
             open: false,
@@ -1865,6 +2069,7 @@ mod tests {
             .state
             .toggle_bookmark(persistence::file_key(&path), location.clone());
         app.open(second.clone());
+        app.wait_for_load();
         assert_eq!(
             app.store.state.reading(&persistence::file_key(&path)),
             Some(&location)
@@ -1874,6 +2079,7 @@ mod tests {
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         assert!(app.viewer.is_none()); // No automatic document reopen.
         app.open(path.clone());
+        app.wait_for_load();
         assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
         assert_eq!(
             app.viewer.as_ref().unwrap().sidebar_state(),
@@ -1884,12 +2090,15 @@ mod tests {
             }
         );
         app.open(second);
+        app.wait_for_load();
         app.open_bookmark(app.store.state.bookmarks[0].clone());
+        app.wait_for_load();
         assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
         app.open_bookmark(Bookmark {
             path: directory.path().join("missing.pdf"),
             reading: ReadingState::default(),
         });
+        app.wait_for_load();
         assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
         assert_eq!(app.store.state.recent.len(), 2);
         app.store.state.clear_history();
@@ -1897,6 +2106,7 @@ mod tests {
         assert!(app.store.state.recent.is_empty());
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         app.open(path);
+        app.wait_for_load();
         assert_eq!(
             app.viewer.as_ref().unwrap().reading_state(),
             ReadingState::default()
@@ -1939,8 +2149,10 @@ mod tests {
         store.save(true).unwrap();
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         app.open(plain.clone());
+        app.wait_for_load();
         let preserved = app.store.state.clone();
         app.open(path.clone()); // The recent-file route always opens without credentials.
+        app.wait_for_load();
         assert!(app.password_prompt.is_some());
         assert_eq!(app.store.state, preserved);
         assert_eq!(
@@ -1953,6 +2165,7 @@ mod tests {
             .input
             .push_str("wrong-secret");
         app.submit_password();
+        app.wait_for_load();
         assert_eq!(app.store.state, preserved);
         let ctx = egui::Context::default();
         password_frame(
@@ -1963,19 +2176,23 @@ mod tests {
         assert!(app.password_prompt.is_none());
         assert_eq!(app.store.state, preserved);
         app.open(path.clone());
+        app.wait_for_load();
         app.password_prompt
             .as_mut()
             .unwrap()
             .input
             .push_str("open-secret");
         app.submit_password();
+        app.wait_for_load();
         assert_eq!(app.viewer.as_ref().unwrap().reading_state(), recent);
         // Closing drops its session-only credentials. Focusing an already-open
         // unlocked tab does not reopen/authenticate the same document.
         app.close_tab(app.tabs.active_id().unwrap());
         app.open(plain);
+        app.wait_for_load();
         let plain_reading = app.viewer.as_ref().unwrap().reading_state();
         app.open_bookmark(app.store.state.bookmarks[0].clone());
+        app.wait_for_load();
         assert!(app.password_prompt.is_some());
         assert_eq!(app.viewer.as_ref().unwrap().reading_state(), plain_reading);
         app.password_prompt
@@ -1984,6 +2201,7 @@ mod tests {
             .input
             .push_str("wrong-secret");
         app.submit_password();
+        app.wait_for_load();
         assert!(app.password_prompt.as_ref().unwrap().incorrect);
         app.password_prompt
             .as_mut()
@@ -1991,6 +2209,7 @@ mod tests {
             .input
             .push_str("open-secret");
         app.submit_password();
+        app.wait_for_load();
         assert_eq!(app.viewer.as_ref().unwrap().reading_state(), bookmark);
         app.save_state(true);
         let json = std::fs::read_to_string(directory.path().join("state.json")).unwrap();
@@ -2000,6 +2219,7 @@ mod tests {
         drop(app);
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         app.open(path);
+        app.wait_for_load();
         assert!(app.password_prompt.is_some());
         assert!(app.viewer.is_none());
     }
@@ -2018,6 +2238,7 @@ mod tests {
             .into();
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         app.open(paths[0].clone());
+        app.wait_for_load();
         let first = app.tabs.active_id().unwrap();
         let location = ReadingState {
             page: 1,
@@ -2034,6 +2255,7 @@ mod tests {
         app.viewer.as_mut().unwrap().restore_reading(&location);
         app.viewer.as_mut().unwrap().restore_sidebar(&sidebar);
         app.open(paths[1].clone());
+        app.wait_for_load();
         let second = app.tabs.active_id().unwrap();
         app.viewer.as_mut().unwrap().restore_reading(&ReadingState {
             page: 0,
@@ -2043,7 +2265,9 @@ mod tests {
             rotation: layout::Rotation::Clockwise,
         });
         app.open(paths[2].clone());
+        app.wait_for_load();
         app.open(paths[0].clone());
+        app.wait_for_load();
         assert_eq!(app.tabs.len(), 3);
         assert_eq!(app.tabs.active_id(), Some(first));
         assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
@@ -2078,8 +2302,10 @@ mod tests {
         };
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         app.open(first.clone());
+        app.wait_for_load();
         app.viewer.as_mut().unwrap().restore_reading(&location);
         app.open(second.clone());
+        app.wait_for_load();
         app.save_state(true);
         assert!(app.store.state.session.files.is_empty());
         app.store.state.restore_session = true;
@@ -2088,6 +2314,7 @@ mod tests {
         drop(app);
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         app.restore_session();
+        app.wait_for_load();
         assert_eq!(app.tabs.len(), 2);
         assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
         assert_eq!(app.viewer.as_ref().unwrap().path(), first);
@@ -2096,6 +2323,7 @@ mod tests {
         std::fs::remove_file(&second).unwrap();
         let second_id = app.tabs.find(&second).unwrap();
         app.select_tab(second_id);
+        app.wait_for_load();
         assert!(app.open_error.is_some());
         assert_eq!(app.viewer.as_ref().unwrap().path(), first);
         app.close_tab(second_id);
@@ -2111,6 +2339,7 @@ mod tests {
         assert_eq!(restart.tabs.len(), 0);
         app.store.state.restore_session = false;
         app.open(first);
+        app.wait_for_load();
         app.save_state(true);
         assert!(app.store.state.session.files.is_empty());
     }
@@ -2132,13 +2361,16 @@ mod tests {
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         app.store.state.restore_session = true;
         app.open(plain.clone());
+        app.wait_for_load();
         app.open(locked.clone());
+        app.wait_for_load();
         app.password_prompt
             .as_mut()
             .unwrap()
             .input
             .push_str("session-secret");
         app.submit_password();
+        app.wait_for_load();
         let location = ReadingState {
             page: 1,
             scroll: [19.0, -137.0],
@@ -2151,6 +2383,7 @@ mod tests {
         drop(app);
         let mut app = App::with_state(Store::temporary(directory.path()), None);
         app.restore_session();
+        app.wait_for_load();
         assert!(app.password_prompt.is_some());
         assert!(app.viewer.is_none());
         let preserved = app.store.state.clone();
@@ -2160,6 +2393,7 @@ mod tests {
             .input
             .push_str("wrong-secret");
         app.submit_password();
+        app.wait_for_load();
         assert_eq!(app.store.state, preserved);
         password_frame(
             &mut app,
@@ -2167,8 +2401,10 @@ mod tests {
             vec![key_event(Key::Escape, Modifiers::NONE)],
         );
         app.select_tab(app.tabs.find(&plain).unwrap());
+        app.wait_for_load();
         let selected = app.tabs.active_id();
         app.select_tab(app.tabs.find(&locked).unwrap());
+        app.wait_for_load();
         assert_eq!(app.tabs.active_id(), selected);
         assert_eq!(app.viewer.as_ref().unwrap().path(), plain);
         app.password_prompt
@@ -2177,6 +2413,7 @@ mod tests {
             .input
             .push_str("session-secret");
         app.submit_password();
+        app.wait_for_load();
         assert_eq!(app.viewer.as_ref().unwrap().reading_state(), location);
         let count = app.tabs.len();
         app.open(plain);
@@ -2198,6 +2435,7 @@ mod tests {
             let path = directory.path().join(format!("{index}.pdf"));
             std::fs::write(&path, document::tests::sample_pdf("", false)).unwrap();
             app.open(path);
+            app.wait_for_load();
         }
         assert_eq!(app.tabs.len(), 16);
         assert!(app.open_error.as_ref().unwrap().contains("limit"));
@@ -2206,6 +2444,7 @@ mod tests {
             directory.path().join("15.pdf")
         );
         app.open(directory.path().join("0.pdf"));
+        app.wait_for_load();
         assert!(app.open_error.is_none());
         assert_eq!(app.tabs.len(), 16);
         assert_eq!(
@@ -2236,6 +2475,7 @@ mod tests {
                 assert_eq!(
                     app_ui(
                         &mut viewer,
+                        &mut None,
                         &mut None,
                         &mut None,
                         ui,

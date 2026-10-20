@@ -21,6 +21,14 @@ sidebar, search, selection and navigation history. Previously visited files
 restore their saved reading state. Cancelling the dialog or failing to open a
 file leaves the current PDF unchanged; errors appear in the window.
 
+File reading, outline extraction and the initial page-dimension scan run in a
+background loader. The window appears before the document is ready, and an
+existing PDF stays usable while another loads. **Cancel loading** or **Escape**
+discards the pending open. Opening another file, selecting a tab or closing a
+tab also cancels it, so a late result cannot change the selected document.
+The editable MuPDF document is still parsed from the loaded bytes on the UI
+thread; unusually expensive parsing can cause a pause after the window appears.
+
 Password-protected PDFs open through a masked password prompt. Press **Enter**
 or **Open PDF** to unlock; an incorrect password clears the field for retry.
 **Cancel** or **Escape** leaves the current document, page and zoom unchanged.

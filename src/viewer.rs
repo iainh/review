@@ -57,10 +57,22 @@ impl Drop for Viewer {
 }
 
 impl Viewer {
+    #[cfg(test)]
     pub fn new(document: PdfDocument) -> Self {
-        let sidebar = Sidebar::new(&document);
+        let metadata = crate::loading::Metadata {
+            key: crate::persistence::file_key(document.path()),
+            sizes: Vec::new(),
+            outline: document
+                .outlines()
+                .map_err(|error| format!("Could not load outline: {error:#}")),
+        };
+        Self::with_metadata(document, metadata)
+    }
+
+    pub fn with_metadata(document: PdfDocument, metadata: crate::loading::Metadata) -> Self {
+        let sidebar = Sidebar::with_outline(metadata.outline);
         let render_worker = RenderWorker::new(document.worker_source());
-        let state_key = crate::persistence::file_key(document.path());
+        let state_key = metadata.key;
         let text_revision = document.text_revision();
         let search = Search::new(&document);
         Self {
@@ -72,7 +84,7 @@ impl Viewer {
             page_input: "1".into(),
             fields_id: egui::Id::new("viewer_fields"),
             error: None,
-            reading: ReadingSurface::default(),
+            reading: ReadingSurface::new(metadata.sizes),
             render_worker,
             search,
             reveal_match: false,

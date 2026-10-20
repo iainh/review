@@ -97,7 +97,7 @@ impl PdfDocument {
         Self::from_bytes(path, Arc::new(bytes), password)
     }
 
-    fn from_bytes(
+    pub(crate) fn from_bytes(
         path: &Path,
         bytes: Arc<Vec<u8>>,
         password: Option<&str>,

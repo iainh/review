@@ -31,14 +31,21 @@ impl Sidebar {
         self.thumbnails.clear();
     }
 
+    #[cfg(test)]
     pub fn new(document: &PdfDocument) -> Self {
+        Self::with_outline(
+            document
+                .outlines()
+                .map_err(|error| format!("Could not load outline: {error:#}")),
+        )
+    }
+
+    pub fn with_outline(outline: Result<Vec<Outline>, String>) -> Self {
         Self {
             open: true,
             pages: false,
             width: 240.0,
-            outline: document
-                .outlines()
-                .map_err(|error| format!("Could not load outline: {error:#}")),
+            outline,
             thumbnails: HashMap::new(),
             thumbnail_dpi: 0.0,
             visible_page: None,

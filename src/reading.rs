@@ -97,6 +97,13 @@ fn page_tiles(
 }
 
 impl ReadingSurface {
+    pub fn new(sizes: Vec<(f32, f32)>) -> Self {
+        Self {
+            sizes,
+            ..Default::default()
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, frame: ReadingFrame<'_>) -> Result<Option<LinkTarget>> {
         let ReadingFrame {
             document,
