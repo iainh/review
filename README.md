@@ -531,6 +531,17 @@ acknowledges it; the unit tests check commands and real viewport-state labels.
 rendered layer toggles and explicit attachment saving/cancellation using a
 synthetic PDF. It additionally requires ImageMagick for pixel checks.
 
+`/usr/bin/python3 tests/memory.py target/release/review /path/to/input.pdf /tmp/memory-run 3`
+benchmarks open, page browsing, 200% zoom, a search attempt, one note, undo,
+redo/save and document close in three fresh release processes. Run in the same
+1280×900 Sway/D-Bus session with `REVIEW_POINTER` pointing to the compiled
+`tests/wayland-pointer.c` helper, plus `python3-pyatspi`, `gdbus`, `wtype` and
+`grim`. It samples process RSS/PSS/private memory and the kernel high-water mark
+every 100 ms, saving raw samples, binary/input hashes and first-run screenshots.
+Checkpoints settle for two seconds before a one-second median. Search errors
+are recorded, not treated as successful full-document scans. Separate GPU,
+compositor and child-process memory are excluded.
+
 `bash tests/wayland-print.sh` checks the print modal, native range and orientation
 controls, cancellation and local PDF export in the same disposable Sway session.
 It requires GTK 3 and `python3-pyatspi` in addition to the tools below. It never

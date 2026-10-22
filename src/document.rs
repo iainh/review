@@ -645,6 +645,19 @@ impl PdfDocument {
     }
 
     pub fn render_at_scale(&self, page_number: usize, scale: f32) -> Result<PageImage> {
+        let pixmap = self.raster_at_scale(page_number, scale)?;
+        Ok(PageImage {
+            width: pixmap.width(),
+            height: pixmap.height(),
+            pixels: Arc::new(egui::ColorImage::from_rgb(
+                [pixmap.width() as usize, pixmap.height() as usize],
+                pixmap.samples(),
+            )),
+        })
+    }
+
+    /// Native opaque RGB pixels for consumers that do not need UI textures.
+    pub(crate) fn raster_at_scale(&self, page_number: usize, scale: f32) -> Result<mupdf::Pixmap> {
         ensure!(page_number < self.page_count, "page is out of range");
         ensure!(scale.is_finite() && scale > 0.0, "invalid rendering scale");
         let page_label = page_number + 1;
@@ -675,15 +688,7 @@ impl PdfDocument {
             )
             .with_context(|| format!("failed to rasterize page {page_label}"))?;
         ensure!(pixmap.n() == 3, "MuPDF returned an unexpected pixel format");
-
-        Ok(PageImage {
-            width: pixmap.width(),
-            height: pixmap.height(),
-            pixels: Arc::new(egui::ColorImage::from_rgb(
-                [pixmap.width() as usize, pixmap.height() as usize],
-                pixmap.samples(),
-            )),
-        })
+        Ok(pixmap)
     }
 
     /// Rasterize a bounded rectangle in scaled, page-local pixels. Allocate

@@ -389,21 +389,15 @@ fn recognize(
     ));
     // MuPDF's in-flight raster cannot be interrupted. It is bounded and stays
     // off the UI thread; cancellation is checked before starting the engine.
-    let image = document.render_at_scale(page, render_scale(size)?)?;
+    let image = document.raster_at_scale(page, render_scale(size)?)?;
     cancelled(cancel)?;
-    let dimensions = [image.width, image.height];
+    let dimensions = [image.width(), image.height()];
     let path = directory.path().join("page.ppm");
     let mut file = BufWriter::new(File::create(&path)?);
-    write!(file, "P6\n{} {}\n255\n", image.width, image.height)?;
-    for row in image.rgba().chunks(image.width as usize * 4) {
+    write!(file, "P6\n{} {}\n255\n", image.width(), image.height())?;
+    for row in image.samples().chunks(image.stride() as usize) {
         cancelled(cancel)?;
-        let rgb: Vec<u8> = row
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|pixel| pixel[..3].iter().copied())
-            .collect();
-        file.write_all(&rgb)?;
+        file.write_all(&row[..image.width() as usize * 3])?;
     }
     file.flush()?;
     drop(file);
