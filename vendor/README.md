@@ -2,11 +2,11 @@
 
 `mupdf/` contains the library source, normalized manifest, README and licence
 from the crates.io `mupdf` 0.8.0 package. MuPDF itself and `mupdf-sys` still use
-the registry versions; this does not change the renderer or native build.
+the registry versions. A small additional C binding is built locally.
 Upstream: <https://github.com/messense/mupdf-rs/tree/v0.8.0>.
 Original crate checksum: `185fb74927a40c569b7152c01c73f4c0206059b8b3d37c7eb007cc3f63453b64`.
 
-The sole library change is in `src/pdf/document.rs`: `permissions()` uses
+In `src/pdf/document.rs`, `permissions()` uses
 `Permission::from_bits_truncate` instead of strict `from_bits` with a fallback
 to all permissions. PDF permission words contain reserved bits. The strict
 conversion rejects them and incorrectly grants all permissions, including for
@@ -30,8 +30,18 @@ keeps permission evaluation in MuPDF on the document's owning thread.
 The upstream examples, integration tests and binary fixtures are omitted, and
 their manifest entries are removed. Review's document tests cover encrypted
 user and owner authentication, print quality, copying and empty passwords.
-Remove the patch and vendored library when an upstream release fixes this
-conversion; keep those regression tests.
+`Document::from_shared_bytes` opens an independently seekable native memory
+stream over immutable `Arc<Vec<u8>>` bytes. A native stream drop callback owns
+the Arc so native document clones and pages cannot outlive the backing bytes.
+`native/review.c` catches MuPDF exceptions in C, including failed opens; no
+longjmp crosses a Rust frame. `native/include` contains the unmodified subset
+of AGPL-3.0-or-later headers needed by this shim, copied from MuPDF 1.27.2 in
+`mupdf-sys` 0.8.0 (upstream commit
+`73d3100d46d8a9ad634f6ef035bbe78f0f947886`). Update those headers together with
+the native dependency. Review tests cover native-handle lifetime, failure
+cleanup, encrypted access, independent worker snapshots and saved replacement.
+Remove these patches when upstream provides equivalent safe APIs and fixes
+permission conversion; keep their regression tests.
 
 # egui-desktop compatibility adaptation
 

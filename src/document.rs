@@ -110,7 +110,7 @@ impl PdfDocument {
     ) -> Result<Option<Self>> {
         // Neither the live document nor workers retain an original-file reader.
         // This also permits replacement on Windows after all UI readers drop.
-        let mut document = Document::from_bytes(&bytes, "application/pdf")
+        let mut document = Document::from_shared_bytes(bytes.clone(), "application/pdf")
             .with_context(|| format!("failed to open PDF at {}", path.display()))?;
         ensure!(
             document.is_pdf(),
@@ -757,6 +757,37 @@ pub(crate) mod tests {
     use super::{PdfDocument, fit_scale};
     use mupdf::pdf::{Encryption, PdfWriteOptions, Permission};
     use std::sync::Arc;
+
+    #[test]
+    fn shared_pdf_bytes_survive_native_handles_and_release_after_errors() {
+        let bytes = Arc::new(sample_pdf(
+            "BT /F1 20 Tf 40 200 Td (Owned stream) Tj ET",
+            false,
+        ));
+        let owner = Arc::downgrade(&bytes);
+        let document =
+            mupdf::Document::from_shared_bytes(bytes.clone(), "application/pdf").unwrap();
+        let clone = document.clone();
+        drop(bytes);
+        drop(document);
+        let page = clone.load_page(0).unwrap();
+        drop(clone);
+        assert!(owner.upgrade().is_some());
+        assert!(
+            page.to_text_page(mupdf::TextPageFlags::empty())
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("Owned stream")
+        );
+        drop(page);
+        assert!(owner.upgrade().is_none());
+
+        let invalid = Arc::new(b"not a PDF".to_vec());
+        let owner = Arc::downgrade(&invalid);
+        assert!(mupdf::Document::from_shared_bytes(invalid, "application/pdf").is_err());
+        assert!(owner.upgrade().is_none());
+    }
 
     pub fn encrypted_fixture(
         path: &std::path::Path,

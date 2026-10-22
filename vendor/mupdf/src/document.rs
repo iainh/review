@@ -1,6 +1,7 @@
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::ptr;
+use std::sync::Arc;
 
 use mupdf_sys::*;
 
@@ -83,6 +84,62 @@ impl Document {
             ))
         }
         .map(|inner| Self { inner })
+    }
+
+    /// Open immutable owned bytes without copying the input buffer. Each call
+    /// opens an independent document and cursor; native references retain the
+    /// bytes until the last dependent document/page/stream is destroyed.
+    pub fn from_shared_bytes(bytes: Arc<Vec<u8>>, magic: &str) -> Result<Self, Error> {
+        unsafe extern "C" {
+            fn review_open_shared(
+                ctx: *mut fz_context,
+                data: *const u8,
+                len: usize,
+                magic: *const std::ffi::c_char,
+                owner: *mut std::ffi::c_void,
+                drop: unsafe extern "C" fn(*mut fz_context, *mut std::ffi::c_void),
+                code: *mut i32,
+                message: *mut std::ffi::c_char,
+            ) -> *mut fz_document;
+        }
+        unsafe extern "C" fn release(_: *mut fz_context, owner: *mut std::ffi::c_void) {
+            // The C shim consumes this owner even when opening fails.
+            unsafe { drop(Box::from_raw(owner.cast::<Arc<Vec<u8>>>())) };
+        }
+        let magic = CString::new(magic)?;
+        let ctx = context();
+        let data = bytes.as_ptr();
+        let len = bytes.len();
+        let owner = Box::into_raw(Box::new(bytes)).cast();
+        let mut code = 0;
+        let mut message = [0; 512];
+        // C catches MuPDF exceptions before returning to Rust. The stream's
+        // final-drop callback owns the Arc, not this particular Rust handle.
+        let inner = unsafe {
+            review_open_shared(
+                ctx,
+                data,
+                len,
+                magic.as_ptr(),
+                owner,
+                release,
+                &mut code,
+                message.as_mut_ptr(),
+            )
+        };
+        if code != 0 {
+            return Err(crate::error::MuPdfError {
+                code,
+                message: unsafe { CStr::from_ptr(message.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned(),
+            }
+            .into());
+        }
+        if inner.is_null() {
+            return Err(Error::UnexpectedNullPtr);
+        }
+        Ok(Self { inner })
     }
 
     pub fn recognize(magic: &str) -> Result<bool, Error> {
