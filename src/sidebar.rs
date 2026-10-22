@@ -155,10 +155,7 @@ impl Sidebar {
                                     .map(|image| {
                                         ui.ctx().load_texture(
                                             format!("preview {page}"),
-                                            egui::ColorImage::from_rgba_unmultiplied(
-                                                [image.width as usize, image.height as usize],
-                                                &image.rgba,
-                                            ),
+                                            image.pixels.clone(),
                                             egui::TextureOptions::LINEAR,
                                         )
                                     })

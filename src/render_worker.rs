@@ -147,7 +147,7 @@ struct Cached {
 
 impl Cached {
     fn bytes(&self) -> usize {
-        self.result.as_ref().map_or(0, |image| image.rgba.len())
+        self.result.as_ref().map_or(0, |image| image.rgba().len())
     }
 }
 
@@ -180,7 +180,7 @@ impl State {
         // smaller tiles share the byte budget with up to 128 total entries.
         if result
             .as_ref()
-            .is_ok_and(|image| image.rgba.len() > CACHE_BYTES)
+            .is_ok_and(|image| image.rgba().len() > CACHE_BYTES)
         {
             return;
         }
@@ -344,7 +344,7 @@ fn render(document: &PdfDocument, key: RenderKey, max_side: usize) -> anyhow::Re
         "This zoom exceeds the graphics texture limit; reduce the zoom"
     );
     anyhow::ensure!(
-        image.rgba.len() <= CACHE_BYTES,
+        image.rgba().len() <= CACHE_BYTES,
         "This zoom exceeds the page rendering memory limit; reduce the zoom"
     );
     Ok(image)
@@ -436,7 +436,8 @@ mod tests {
                 let start = ((y - y0) * image.width * 4) as usize;
                 let length = (image.width * 4) as usize;
                 assert!(
-                    image.rgba[start..start + length] == full.rgba[full_start..full_start + length],
+                    image.rgba()[start..start + length]
+                        == full.rgba()[full_start..full_start + length],
                     "tile {:?}, row {y}",
                     tile.key.region
                 );
@@ -483,7 +484,7 @@ mod tests {
             region: Some([29, 39, 181, 223]),
             ..RenderKey::new(0, 2.0)
         };
-        let before = render(&document, key, 2048).unwrap().rgba;
+        let before = render(&document, key, 2048).unwrap().pixels;
         let original = document.worker_source();
         document
             .add_annotation(
@@ -495,22 +496,22 @@ mod tests {
                 3.0,
             )
             .unwrap();
-        let edited = render(&document, key, 2048).unwrap().rgba;
+        let edited = render(&document, key, 2048).unwrap().pixels;
         assert_ne!(edited, before);
         let current = document.worker_source();
         document.undo().unwrap();
         let undone = document.worker_source();
         std::thread::spawn(move || {
             assert_eq!(
-                render(&original.open().unwrap(), key, 2048).unwrap().rgba,
+                render(&original.open().unwrap(), key, 2048).unwrap().pixels,
                 before
             );
             assert_eq!(
-                render(&current.open().unwrap(), key, 2048).unwrap().rgba,
+                render(&current.open().unwrap(), key, 2048).unwrap().pixels,
                 edited
             );
             assert_eq!(
-                render(&undone.open().unwrap(), key, 2048).unwrap().rgba,
+                render(&undone.open().unwrap(), key, 2048).unwrap().pixels,
                 before
             );
         })
@@ -531,7 +532,8 @@ mod tests {
             let start = y * 182 * 4;
             let full_start = ((y + 71) * 300 + 39) * 4;
             assert!(
-                tile.rgba[start..start + 182 * 4] == full.rgba[full_start..full_start + 182 * 4],
+                tile.rgba()[start..start + 182 * 4]
+                    == full.rgba()[full_start..full_start + 182 * 4],
                 "rotated alpha crop row {y}"
             );
         }
@@ -570,11 +572,11 @@ mod tests {
         };
         assert_eq!((image.width, image.height), (257, 345));
         assert_eq!(
-            image.rgba,
+            image.pixels,
             document
                 .render_region(0, 3.0, [12, 32, 269, 377])
                 .unwrap()
-                .rgba
+                .pixels
         );
         let shared = worker.shared.clone();
         drop(worker);
@@ -613,10 +615,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
         assert_eq!((image.width, image.height), (600, 300));
-        assert_eq!(image.rgba.len(), 600 * 300 * 4);
+        assert_eq!(image.rgba().len(), 600 * 300 * 4);
         assert!(
             image
-                .rgba
+                .rgba()
                 .as_chunks::<4>()
                 .0
                 .iter()
@@ -672,7 +674,7 @@ mod tests {
                 Ok(Arc::new(PageImage {
                     width: 2048,
                     height: 2048,
-                    rgba: vec![255; 2048 * 2048 * 4],
+                    pixels: Arc::new(egui::ColorImage::filled([2048, 2048], egui::Color32::WHITE)),
                 })),
             );
         }
@@ -686,7 +688,7 @@ mod tests {
         let image = Arc::new(PageImage {
             width: 1026,
             height: 1026,
-            rgba: vec![255; 1026 * 1026 * 4],
+            pixels: Arc::new(egui::ColorImage::filled([1026, 1026], egui::Color32::WHITE)),
         });
         for x in 0..40 {
             state.insert(

@@ -817,7 +817,7 @@ pub(crate) mod tests {
         assert!(!field(&document, 0, 13).checked);
         assert!(field(&document, 1, 14).checked);
         let revision = document.text_revision();
-        let before = document.render_at_scale(0, 1.0).unwrap().rgba;
+        let before = document.render_at_scale(0, 1.0).unwrap().pixels;
         document
             .set_form_value(0, 10, Value::Text("Ada résumé".into()))
             .unwrap();
@@ -827,7 +827,7 @@ pub(crate) mod tests {
             "JavaScript must not replace the supplied value"
         );
         assert!(document.text_revision() > revision);
-        assert_ne!(before, document.render_at_scale(0, 1.0).unwrap().rgba);
+        assert_ne!(before, document.render_at_scale(0, 1.0).unwrap().pixels);
         assert_eq!(
             document
                 .worker_source()

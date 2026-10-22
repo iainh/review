@@ -13,7 +13,13 @@ const PAGE_MARGIN: u32 = 64;
 pub struct PageImage {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pub pixels: Arc<egui::ColorImage>,
+}
+
+impl PageImage {
+    pub fn rgba(&self) -> &[u8] {
+        self.pixels.as_raw()
+    }
 }
 
 pub struct PdfDocument {
@@ -645,7 +651,10 @@ impl PdfDocument {
         Ok(PageImage {
             width: pixmap.width(),
             height: pixmap.height(),
-            rgba: rgb_to_rgba(pixmap.samples()),
+            pixels: Arc::new(egui::ColorImage::from_rgb(
+                [pixmap.width() as usize, pixmap.height() as usize],
+                pixmap.samples(),
+            )),
         })
     }
 
@@ -702,20 +711,23 @@ impl PdfDocument {
         drop(device);
         ensure!(pixmap.n() == 3, "MuPDF returned an unexpected pixel format");
         let samples = pixmap.samples();
-        let mut rgba = Vec::with_capacity((x1 - x0) as usize * (y1 - y0) as usize * 4);
+        let mut pixels = Vec::with_capacity((x1 - x0) as usize * (y1 - y0) as usize);
         for y in y0..y1 {
             let start = ((y - top) as usize * (right - left) as usize + (x0 - left) as usize) * 3;
             for pixel in samples[start..start + (x1 - x0) as usize * 3]
                 .as_chunks::<3>()
                 .0
             {
-                rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+                pixels.push(egui::Color32::from_rgb(pixel[0], pixel[1], pixel[2]));
             }
         }
         Ok(PageImage {
             width: x1 - x0,
             height: y1 - y0,
-            rgba,
+            pixels: Arc::new(egui::ColorImage::new(
+                [(x1 - x0) as usize, (y1 - y0) as usize],
+                pixels,
+            )),
         })
     }
 }
@@ -740,18 +752,9 @@ fn fit_scale(viewport: (u32, u32), page: (f32, f32), zoom: f32) -> f32 {
         * zoom
 }
 
-fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
-    let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
-    let (pixels, _) = rgb.as_chunks::<3>();
-    for pixel in pixels {
-        rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
-    }
-    rgba
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{PdfDocument, fit_scale, rgb_to_rgba};
+    use super::{PdfDocument, fit_scale};
     use mupdf::pdf::{Encryption, PdfWriteOptions, Permission};
     use std::sync::Arc;
 
@@ -1065,10 +1068,10 @@ pub(crate) mod tests {
         let document = sample_document();
         let image = document.render_page(1, (244, 244), 1.0).unwrap();
         assert_eq!((image.width, image.height), (180, 90));
-        assert_eq!(image.rgba.len(), 180 * 90 * 4);
+        assert_eq!(image.rgba().len(), 180 * 90 * 4);
         assert!(
             image
-                .rgba
+                .rgba()
                 .as_chunks::<4>()
                 .0
                 .iter()
@@ -1128,7 +1131,7 @@ pub(crate) mod tests {
         assert_eq!((image.width, image.height), (150, 240));
         let pixel = |x: usize, y: usize| {
             let offset = (y * image.width as usize + x) * 4;
-            &image.rgba[offset..offset + 4]
+            &image.rgba()[offset..offset + 4]
         };
         assert_eq!(pixel(0, 0), [255, 255, 255, 255]);
         // PDF (x,y) maps to (y−60,x−30) after crop and intrinsic rotation.
@@ -1158,7 +1161,7 @@ pub(crate) mod tests {
         })
         .join()
         .unwrap();
-        assert_eq!(worker_image.rgba, image.rgba);
+        assert_eq!(worker_image.rgba(), image.rgba());
         assert_eq!(document.current_page(), 0);
     }
 
@@ -1179,7 +1182,7 @@ pub(crate) mod tests {
         assert_eq!((image.width, image.height), (400, 200));
         assert!(
             image
-                .rgba
+                .rgba()
                 .as_chunks::<4>()
                 .0
                 .iter()
@@ -1216,8 +1219,8 @@ pub(crate) mod tests {
             .render_region(0, 16.0, [63_900, 47_500, 64_400, 48_300])
             .unwrap();
         assert_eq!((image.width, image.height), (500, 800));
-        assert_eq!(image.rgba.len(), 500 * 800 * 4);
-        assert!(image.rgba.as_chunks::<4>().0.iter().any(|p| p[0] < 128));
+        assert_eq!(image.rgba().len(), 500 * 800 * 4);
+        assert!(image.rgba().as_chunks::<4>().0.iter().any(|p| p[0] < 128));
         assert!(
             document
                 .structured_text(0)
@@ -1261,7 +1264,7 @@ pub(crate) mod tests {
     #[test]
     fn converts_rgb_pixels_to_opaque_rgba() {
         assert_eq!(
-            rgb_to_rgba(&[1, 2, 3, 10, 20, 30]),
+            egui::ColorImage::from_rgb([2, 1], &[1, 2, 3, 10, 20, 30]).as_raw(),
             [1, 2, 3, 255, 10, 20, 30, 255]
         );
     }

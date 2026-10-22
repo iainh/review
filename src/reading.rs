@@ -292,14 +292,11 @@ impl ReadingSurface {
                         // pixel-cache eviction could requeue an already drawn tile.
                         match worker.image(tile.key, Priority::Page) {
                             Some(Ok(image)) => {
-                                let new_bytes = image.rgba.len();
+                                let new_bytes = image.rgba().len();
                                 if bytes + new_bytes <= TEXTURE_BYTES {
                                     e.insert(ui.ctx().load_texture(
                                         format!("PDF page {} tile", key.page + 1),
-                                        egui::ColorImage::from_rgba_unmultiplied(
-                                            [image.width as usize, image.height as usize],
-                                            &image.rgba,
-                                        ),
+                                        image.pixels.clone(),
                                         egui::TextureOptions::LINEAR,
                                     ));
                                     bytes += new_bytes;

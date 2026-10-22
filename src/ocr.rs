@@ -395,7 +395,7 @@ fn recognize(
     let path = directory.path().join("page.ppm");
     let mut file = BufWriter::new(File::create(&path)?);
     write!(file, "P6\n{} {}\n255\n", image.width, image.height)?;
-    for row in image.rgba.chunks(image.width as usize * 4) {
+    for row in image.rgba().chunks(image.width as usize * 4) {
         cancelled(cancel)?;
         let rgb: Vec<u8> = row
             .as_chunks::<4>()

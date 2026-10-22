@@ -758,7 +758,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("annotations.pdf");
         let mut document = sample_document();
-        let before = document.render_at_scale(0, 1.0).unwrap().rgba;
+        let before = document.render_at_scale(0, 1.0).unwrap().pixels;
         let print_pixels = |document: &PdfDocument| {
             document
                 .print_page(0)
@@ -803,7 +803,7 @@ mod tests {
             )
             .unwrap();
         assert!(document.is_dirty());
-        assert_ne!(document.render_at_scale(0, 1.0).unwrap().rgba, before);
+        assert_ne!(document.render_at_scale(0, 1.0).unwrap().pixels, before);
         assert_ne!(
             print_pixels(&document),
             print_before,
@@ -815,7 +815,7 @@ mod tests {
         let reopened = PdfDocument::open(&path).unwrap();
         assert_eq!(reopened.annotations(0).unwrap(), expected);
         assert_eq!(reopened.annotations(1).unwrap()[0].width, 3.5);
-        assert_ne!(reopened.render_at_scale(0, 1.0).unwrap().rgba, before);
+        assert_ne!(reopened.render_at_scale(0, 1.0).unwrap().pixels, before);
         let page = reopened.document.load_pdf_page(0).unwrap();
         for annotation in page.annotations().take(3) {
             let q = annotation.quad_points().unwrap().remove(0);

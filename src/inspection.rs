@@ -474,7 +474,7 @@ pub(crate) mod tests {
         let mut document = crate::document::PdfDocument::open(&source).unwrap();
         let red = |image: crate::document::PageImage| {
             image
-                .rgba
+                .rgba()
                 .as_chunks::<4>()
                 .0
                 .iter()
@@ -690,7 +690,7 @@ pub(crate) mod tests {
             let image = worker.render_at_scale(0, 1.0).unwrap();
             assert!(
                 image
-                    .rgba
+                    .rgba()
                     .as_chunks::<4>()
                     .0
                     .iter()
