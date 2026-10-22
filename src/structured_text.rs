@@ -251,7 +251,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn extract(bytes: &[u8]) -> PageText {
+    fn extract(bytes: &[u8]) -> std::sync::Arc<PageText> {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), bytes).unwrap();
         PdfDocument::open(file.path())

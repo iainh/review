@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -32,6 +32,9 @@ pub struct PdfDocument {
     current_page: usize,
     session_password: Option<Arc<Zeroizing<String>>>,
     recognized: Arc<Mutex<RecognizedText>>,
+    // Weak entries reuse text still owned by visible-page consumers without
+    // retaining a document-wide text cache after those consumers release it.
+    native_text: Mutex<HashMap<usize, Weak<crate::structured_text::PageText>>>,
     history: Vec<Snapshot>,
     history_position: usize,
     saved_revision: u64,
@@ -45,7 +48,7 @@ struct Snapshot {
 
 #[derive(Default)]
 struct RecognizedText {
-    pages: HashMap<usize, crate::structured_text::PageText>,
+    pages: HashMap<usize, Arc<crate::structured_text::PageText>>,
     revision: u64,
 }
 
@@ -152,6 +155,7 @@ impl PdfDocument {
             current_page: 0,
             session_password: password.map(|p| Arc::new(Zeroizing::new(p.to_owned()))),
             recognized: Arc::default(),
+            native_text: Mutex::default(),
             history: vec![Snapshot { bytes, revision: 0 }],
             history_position: 0,
             saved_revision: 0,
@@ -520,7 +524,10 @@ impl PdfDocument {
 
     /// Extraction itself is permission-neutral. Copy and accessibility consumers
     /// must independently enforce their respective document permissions.
-    pub fn structured_text(&self, page_number: usize) -> Result<crate::structured_text::PageText> {
+    pub fn structured_text(
+        &self,
+        page_number: usize,
+    ) -> Result<Arc<crate::structured_text::PageText>> {
         let native = self.native_text(page_number)?;
         if !native.chars.is_empty() {
             return Ok(native);
@@ -545,6 +552,7 @@ impl PdfDocument {
     /// when replacing the live source so old workers observe this revision too.
     /// Layer visibility changes also call this after updating the active view.
     pub fn invalidate_text(&self) {
+        self.native_text.lock().unwrap().clear();
         let mut recognized = self.recognized.lock().unwrap();
         recognized.pages.clear();
         recognized.revision += 1;
@@ -560,18 +568,33 @@ impl PdfDocument {
             "This page already has native text; OCR will not replace it"
         );
         let mut recognized = self.recognized.lock().unwrap();
-        recognized.pages.insert(page_number, text);
+        recognized.pages.insert(page_number, Arc::new(text));
         recognized.revision += 1;
         Ok(())
     }
 
-    pub fn native_text(&self, page_number: usize) -> Result<crate::structured_text::PageText> {
+    pub fn native_text(&self, page_number: usize) -> Result<Arc<crate::structured_text::PageText>> {
         ensure!(page_number < self.page_count, "page is out of range");
+        if let Some(text) = self
+            .native_text
+            .lock()
+            .unwrap()
+            .get(&page_number)
+            .and_then(Weak::upgrade)
+        {
+            return Ok(text);
+        }
         let page = self.rendering_document().load_page(page_number as i32)?;
         let bounds = page.bounds()?;
         let text = page.to_text_page(TextPageFlags::SEGMENT | TextPageFlags::PARAGRAPH_BREAK)?;
-        crate::structured_text::PageText::from_xml(&text.to_xml(page_number as i32)?, bounds)
-            .with_context(|| format!("failed to extract text from page {}", page_number + 1))
+        let text = Arc::new(
+            crate::structured_text::PageText::from_xml(&text.to_xml(page_number as i32)?, bounds)
+                .with_context(|| format!("failed to extract text from page {}", page_number + 1))?,
+        );
+        let mut cache = self.native_text.lock().unwrap();
+        cache.retain(|_, text| text.strong_count() > 0);
+        cache.insert(page_number, Arc::downgrade(&text));
+        Ok(text)
     }
 
     pub fn page_text(&self, page_number: usize) -> Result<String> {

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, ops::Range};
+use std::{collections::BTreeMap, ops::Range, sync::Arc};
 
 use anyhow::Result;
 use egui::{Color32, Key, Modifiers, Rect, Sense, Ui, Vec2};
@@ -15,7 +15,7 @@ struct Endpoint {
 /// explicit navigation clears them. Copy extracts intervening pages on demand.
 #[derive(Default)]
 pub struct Selection {
-    cache: BTreeMap<usize, PageText>,
+    cache: BTreeMap<usize, Arc<PageText>>,
     revision: u64,
     anchor: Endpoint,
     end: Endpoint,
@@ -354,7 +354,11 @@ impl Selection {
                 if page != start {
                     output.push('\n');
                 }
-                output.push_str(&text.text(self.range(page, text.chars.len())));
+                output.extend(
+                    text.chars[self.range(page, text.chars.len())]
+                        .iter()
+                        .map(|ch| ch.ch),
+                );
             }
             ctx.copy_text(output);
         }
@@ -378,7 +382,7 @@ mod tests {
             [[0.3, 0.7], [0.3, 0.65], [0.25, 0.65], [0.25, 0.7]],
             [[0.3, 0.5], [0.3, 0.45], [0.25, 0.45], [0.25, 0.5]],
         ];
-        let text = selection.cache.entry(0).or_default();
+        let text = Arc::make_mut(selection.cache.entry(0).or_default());
         text.chars = quads
             .into_iter()
             .map(|quad| TextChar {
@@ -403,7 +407,7 @@ mod tests {
             }
         }
         assert!(selection.quads(1).is_empty());
-        selection.cache.get_mut(&0).unwrap().lines = vec![
+        Arc::make_mut(selection.cache.get_mut(&0).unwrap()).lines = vec![
             TextLine {
                 chars: 0..1,
                 direction: [0.0, -1.0],
