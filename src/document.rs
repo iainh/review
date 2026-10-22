@@ -33,6 +33,7 @@ pub struct PdfDocument {
     // Weak entries reuse text still owned by visible-page consumers without
     // retaining a document-wide text cache after those consumers release it.
     native_text: Mutex<HashMap<usize, Weak<crate::structured_text::PageText>>>,
+    bytes: Arc<Vec<u8>>,
     history: Vec<Snapshot>,
     history_position: usize,
     saved_revision: u64,
@@ -40,7 +41,9 @@ pub struct PdfDocument {
 }
 
 struct Snapshot {
-    bytes: Arc<Vec<u8>>,
+    // Edge from this state to its predecessor before/at the cursor; from its
+    // predecessor to this state after the cursor. The oldest has no edge.
+    transition: Option<crate::history::Patch>,
     revision: u64,
 }
 
@@ -153,7 +156,11 @@ impl PdfDocument {
             session_password: password.map(|p| Arc::new(Zeroizing::new(p.to_owned()))),
             recognized: Arc::default(),
             native_text: Mutex::default(),
-            history: vec![Snapshot { bytes, revision: 0 }],
+            bytes,
+            history: vec![Snapshot {
+                transition: None,
+                revision: 0,
+            }],
             history_position: 0,
             saved_revision: 0,
             next_revision: 1,
@@ -179,7 +186,7 @@ impl PdfDocument {
             password: self.session_password.clone(),
             layers: self.layer_settings.clone(),
             recognized: self.recognized.clone(),
-            bytes: self.history[self.history_position].bytes.clone(),
+            bytes: self.bytes.clone(),
         }
     }
 
@@ -206,16 +213,27 @@ impl PdfDocument {
     }
 
     fn restore(&mut self, position: usize) -> Result<()> {
+        let edge = position.max(self.history_position);
+        let bytes = Arc::new(
+            self.history[edge]
+                .transition
+                .as_ref()
+                .unwrap()
+                .apply(&self.bytes),
+        );
         let mut restored = Self::from_bytes(
             &self.path,
-            self.history[position].bytes.clone(),
+            bytes.clone(),
             self.session_password.as_deref().map(|p| p.as_str()),
         )?
         .context("Undo PDF could not be authenticated")?;
         if !self.layer_settings.is_empty() {
             restored.apply_layer_visibility(&self.layer_settings)?;
         }
+        let inverse = crate::history::Patch::between(&bytes, &self.bytes);
         self.document = restored.document;
+        self.bytes = bytes;
+        self.history[edge].transition = Some(inverse);
         self.history_position = position;
         self.invalidate_text();
         Ok(())
@@ -231,7 +249,7 @@ impl PdfDocument {
         // are view-only and must never become part of an edited/saved source.
         let mut candidate = Self::from_bytes(
             &self.path,
-            self.history[self.history_position].bytes.clone(),
+            self.bytes.clone(),
             self.session_password.as_deref().map(|p| p.as_str()),
         )?
         .context("Edit PDF could not be authenticated")?;
@@ -256,20 +274,31 @@ impl PdfDocument {
         if !self.layer_settings.is_empty() {
             reopened.apply_layer_visibility(&self.layer_settings)?;
         }
+        let transition = crate::history::Patch::between(&bytes, &self.bytes);
         self.document = reopened.document;
+        self.bytes = bytes;
         self.history.truncate(self.history_position + 1);
         self.history.push(Snapshot {
-            bytes,
+            transition: Some(transition),
             revision: self.next_revision,
         });
         self.next_revision += 1;
         // Bound history by count and bytes, retaining at least the current and
-        // previous versions. No temporary decrypted files are used for undo.
+        // previous versions. Count actual delta allocations, not logical PDF
+        // sizes. Worker snapshots may independently keep older bytes alive.
         while self.history.len() > 32
             || (self.history.len() > 2
-                && self.history.iter().map(|s| s.bytes.len()).sum::<usize>() > 256 * 1024 * 1024)
+                && self.bytes.len()
+                    + self
+                        .history
+                        .iter()
+                        .filter_map(|s| s.transition.as_ref())
+                        .map(crate::history::Patch::retained_bytes)
+                        .sum::<usize>()
+                    > 256 * 1024 * 1024)
         {
             self.history.remove(0);
+            self.history[0].transition = None;
         }
         self.history_position = self.history.len() - 1;
         self.invalidate_text();

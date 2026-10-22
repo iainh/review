@@ -5,6 +5,7 @@ mod desktop;
 mod document;
 mod fonts;
 mod forms;
+mod history;
 mod icons;
 mod inspection;
 mod inspector;

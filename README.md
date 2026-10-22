@@ -184,8 +184,10 @@ Use **Undo**/**Redo**, **Ctrl+Z**/**Ctrl+Shift+Z** (**Cmd+Z**/**Cmd+Shift+Z**), 
 **Ctrl+Y** to undo and redo committed document edits. When editing a text field,
 these shortcuts affect that field instead. History retains up to 32 document
 versions and is bounded by 256 MB, except that it always retains the current and
-previous version. Edits serialize and reopen a full PDF snapshot, so large PDFs
-can pause briefly and consume additional memory.
+previous version. Older versions store byte deltas rather than complete PDFs;
+unchanged chunks are copied from the current version when undoing or redoing.
+Edits still serialize and reopen an isolated PDF to preserve failure recovery,
+so large PDFs can pause briefly and use additional transient memory.
 
 **Save** (**Ctrl+S** / **Cmd+S**) replaces the current PDF. **Save As…**
 (**Ctrl+Shift+S** / **Cmd+Shift+S**) chooses another file and makes it the current

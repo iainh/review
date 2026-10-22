@@ -1095,10 +1095,74 @@ mod tests {
         assert!(document.is_dirty());
         document.undo().unwrap();
         assert!(!document.is_dirty());
+        assert!(
+            document
+                .edit(|pdf| {
+                    pdf.load_pdf_page(0)?
+                        .create_annotation(PdfAnnotationType::Text)?;
+                    anyhow::bail!("fail after mutation")
+                })
+                .is_err()
+        );
+        assert!(!document.is_dirty());
+        assert_eq!(document.annotations(0).unwrap().len(), 1);
+        document.redo().unwrap();
+        assert_eq!(document.annotations(0).unwrap().len(), 2);
+        document.undo().unwrap();
+        assert!(!document.is_dirty());
         add_note(&mut document, "third");
         assert!(!document.can_redo());
         assert!(document.redo().is_err());
+        assert!(document.is_dirty());
         assert_eq!(document.annotations(0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn large_annotation_history_restores_exact_bytes_across_save_and_eviction() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.pdf");
+        let mut document = sample_document();
+        let original: String = (0..180_000)
+            .map(|i| char::from(b'a' + ((i * 37 + i / 97) % 26) as u8))
+            .collect();
+        add_note(&mut document, &original);
+        document.save(&path).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let old_worker = document.worker_source();
+        let xref = document.annotations(0).unwrap()[0].xref;
+        let mut changed = original.clone();
+        changed.replace_range(8190..8291, "short replacement");
+        changed.insert_str(65535, "inserted at a chunk boundary");
+        document
+            .update_annotation(0, xref, &changed, [0.5; 3], 2.0)
+            .unwrap();
+        document.undo().unwrap();
+        assert!(!document.is_dirty());
+        document.save(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+        document.redo().unwrap();
+        assert_eq!(document.annotations(0).unwrap()[0].contents, changed);
+        assert_eq!(
+            old_worker.open().unwrap().annotations(0).unwrap()[0].contents,
+            original
+        );
+        // Eviction must keep the remaining adjacent transitions usable.
+        for i in 0..34 {
+            document
+                .update_annotation(0, xref, &format!("revision {i}"), [0.5; 3], 2.0)
+                .unwrap();
+        }
+        let mut steps = 0;
+        while document.can_undo() {
+            document.undo().unwrap();
+            steps += 1;
+        }
+        assert_eq!(steps, 31);
+        assert_eq!(document.annotations(0).unwrap()[0].contents, "revision 2");
+        while document.can_redo() {
+            document.redo().unwrap();
+        }
+        assert_eq!(document.annotations(0).unwrap()[0].contents, "revision 33");
     }
 
     #[test]
