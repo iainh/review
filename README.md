@@ -343,8 +343,8 @@ decompression-memory limit. Treat embedded files as untrusted.
 
 Layer checkboxes change the default configuration for this viewing session;
 they never save the PDF. Locked layers and radio/usage-controlled configurations
-are read-only. The safe binding has no runtime layer API: Review rebuilds an
-in-memory rendering copy after changes, which may be slow for large documents.
+are read-only. Runtime visibility is applied directly to each native document,
+without serializing or retaining an additional rendering copy.
 
 Signature inspection reads AcroForm fields, including invisible fields.
 **Signature present does not mean valid or trusted.** Review does not verify

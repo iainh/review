@@ -1712,6 +1712,56 @@ impl PdfDocument {
         self.ensure_indirect_array_entry(&mut config, "Order", &oc_ref, reference.xref())
     }
 
+    /// Change only runtime visibility, leaving saved PDF layer dictionaries
+    /// untouched. All references are validated before the configuration changes.
+    pub fn set_runtime_layers(&mut self, settings: &[(i32, bool)]) -> Result<(), Error> {
+        unsafe extern "C" {
+            fn review_set_layers(
+                ctx: *mut fz_context,
+                document: *mut pdf_document,
+                count: usize,
+                indices: *const i32,
+                enabled: *const i32,
+                error: *mut *mut mupdf_error_t,
+            );
+        }
+        let mut references = Vec::new();
+        if let Some(properties) = self.optional_content_properties()? {
+            if let Some(groups) = properties.get_dict("OCGs")? {
+                for index in 0..groups.len()? {
+                    references.push(
+                        groups
+                            .get_array(index as i32)?
+                            .map(|g| g.as_indirect())
+                            .transpose()?
+                            .unwrap_or(0),
+                    );
+                }
+            }
+        }
+        // MuPDF 1.27.2's pdf_read_ocg sorts its runtime entries by decreasing
+        // object number, not by the PDF's /OCGs array or display-name order.
+        references.sort_unstable_by(|a, b| b.cmp(a));
+        let mut indices = Vec::with_capacity(settings.len());
+        let mut enabled = Vec::with_capacity(settings.len());
+        for &(xref, state) in settings {
+            let index = references.iter().position(|&r| r == xref).ok_or_else(|| {
+                Error::InvalidArgument("Unknown optional-content reference".into())
+            })?;
+            indices.push(i32::try_from(index)?);
+            enabled.push(i32::from(state));
+        }
+        unsafe {
+            ffi_try!(review_set_layers(
+                context(),
+                self.inner,
+                indices.len(),
+                indices.as_ptr(),
+                enabled.as_ptr()
+            ))
+        }
+    }
+
     pub fn optional_content_enabled(&self, reference: OptionalContentRef) -> Result<bool, Error> {
         self.validate_optional_content_ref(reference)?;
         let Some(properties) = self.optional_content_properties()? else {

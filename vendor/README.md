@@ -40,6 +40,11 @@ of AGPL-3.0-or-later headers needed by this shim, copied from MuPDF 1.27.2 in
 `73d3100d46d8a9ad634f6ef035bbe78f0f947886`). Update those headers together with
 the native dependency. Review tests cover native-handle lifetime, failure
 cleanup, encrypted access, independent worker snapshots and saved replacement.
+`PdfDocument::set_runtime_layers` applies view-only optional-content settings
+through native layer APIs instead of editing PDF dictionaries and reopening a
+rendering copy. It validates references first and maps MuPDF 1.27.2's descending
+xref order explicitly. Existing layer tests cover pixels, text, worker views,
+printing, encryption and saving with the original layer defaults preserved.
 Remove these patches when upstream provides equivalent safe APIs and fixes
 permission conversion; keep their regression tests.
 

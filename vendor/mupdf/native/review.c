@@ -36,3 +36,22 @@ fz_document *review_open_shared(fz_context *ctx, const unsigned char *data,
     }
     return document;
 }
+
+typedef struct pdf_document pdf_document;
+typedef struct mupdf_error mupdf_error_t;
+void mupdf_save_error(fz_context *, mupdf_error_t **);
+void pdf_select_layer_config(fz_context *, pdf_document *, int);
+void pdf_enable_layer(fz_context *, pdf_document *, int, int);
+
+void review_set_layers(fz_context *ctx, pdf_document *document, size_t count,
+    const int *indices, const int *enabled, mupdf_error_t **errptr)
+{
+    fz_try(ctx)
+    {
+        pdf_select_layer_config(ctx, document, -1);
+        for (size_t i = 0; i < count; ++i)
+            pdf_enable_layer(ctx, document, indices[i], enabled[i]);
+    }
+    fz_catch(ctx)
+        mupdf_save_error(ctx, errptr);
+}

@@ -24,8 +24,6 @@ impl PageImage {
 
 pub struct PdfDocument {
     pub(crate) document: mupdf::pdf::PdfDocument,
-    // A fresh, unsaved copy for layer visibility. Inspection always uses source.
-    layer_document: Option<mupdf::pdf::PdfDocument>,
     layer_settings: Vec<(i32, bool)>,
     path: PathBuf,
     page_count: usize,
@@ -148,7 +146,6 @@ impl PdfDocument {
 
         Ok(Some(Self {
             document,
-            layer_document: None,
             layer_settings: Vec::new(),
             path: path.to_path_buf(),
             page_count,
@@ -218,7 +215,6 @@ impl PdfDocument {
         if !self.layer_settings.is_empty() {
             restored.apply_layer_visibility(&self.layer_settings)?;
         }
-        self.layer_document = restored.layer_document;
         self.document = restored.document;
         self.history_position = position;
         self.invalidate_text();
@@ -260,7 +256,6 @@ impl PdfDocument {
         if !self.layer_settings.is_empty() {
             reopened.apply_layer_visibility(&self.layer_settings)?;
         }
-        self.layer_document = reopened.layer_document;
         self.document = reopened.document;
         self.history.truncate(self.history_position + 1);
         self.history.push(Snapshot {
@@ -348,7 +343,7 @@ impl PdfDocument {
     pub fn print_page(&self, page: usize) -> Result<mupdf::Page> {
         ensure!(self.permissions().print, "This PDF does not allow printing");
         ensure!(page < self.page_count, "print page is out of range");
-        self.rendering_document()
+        self.document
             .load_page(page as i32)
             .context("failed to load print page")
     }
@@ -421,10 +416,6 @@ impl PdfDocument {
         &self.document
     }
 
-    fn rendering_document(&self) -> &Document {
-        self.layer_document.as_deref().unwrap_or(&self.document)
-    }
-
     pub fn page_label(&self, page: usize) -> Result<String> {
         ensure!(page < self.page_count, "page is out of range");
         Ok(self.document.page_label(page)?)
@@ -492,19 +483,7 @@ impl PdfDocument {
     }
 
     fn apply_layer_visibility(&mut self, settings: &[(i32, bool)]) -> Result<()> {
-        // mupdf-rs's setter edits /D/ON and /D/OFF, but does not reset MuPDF's
-        // runtime OCG cache. Recreate a rendering-only document before loading
-        // any pages. Never write this copy back to the original file.
-        let mut bytes = Zeroizing::new(Vec::new());
-        let mut options = mupdf::pdf::PdfWriteOptions::default();
-        options.set_encryption(mupdf::pdf::Encryption::None);
-        self.document.write_to_with_options(&mut *bytes, options)?;
-        let mut copy = mupdf::pdf::PdfDocument::from_bytes(&bytes)?;
-        copy.disable_js()?;
-        for &(xref, enabled) in settings {
-            copy.set_optional_content_enabled(mupdf::pdf::OptionalContentRef::new(xref)?, enabled)?;
-        }
-        self.layer_document = Some(copy);
+        self.document.set_runtime_layers(settings)?;
         self.layer_settings = settings.to_vec();
         Ok(())
     }
@@ -584,7 +563,7 @@ impl PdfDocument {
         {
             return Ok(text);
         }
-        let page = self.rendering_document().load_page(page_number as i32)?;
+        let page = self.document.load_page(page_number as i32)?;
         let bounds = page.bounds()?;
         let text = page.to_text_page(TextPageFlags::SEGMENT | TextPageFlags::PARAGRAPH_BREAK)?;
         let text = Arc::new(
@@ -619,10 +598,7 @@ impl PdfDocument {
 
     pub fn page_size(&self, page_number: usize) -> Result<(f32, f32)> {
         ensure!(page_number < self.page_count, "page is out of range");
-        let bounds = self
-            .rendering_document()
-            .load_page(page_number as i32)?
-            .bounds()?;
+        let bounds = self.document.load_page(page_number as i32)?.bounds()?;
         let size = (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
         ensure!(size.0 > 0.0 && size.1 > 0.0, "page has invalid bounds");
         Ok(size)
@@ -644,7 +620,7 @@ impl PdfDocument {
         ensure!(scale.is_finite() && scale > 0.0, "invalid rendering scale");
         let page_label = page_number + 1;
         let page = self
-            .rendering_document()
+            .document
             .load_page(page_number as i32)
             .with_context(|| format!("failed to load page {page_label}"))?;
         let bounds = page
@@ -700,7 +676,7 @@ impl PdfDocument {
             u64::from(x1 - x0) * u64::from(y1 - y0) <= 64_000_000,
             "rendering region exceeds the memory limit"
         );
-        let page = self.rendering_document().load_page(page_number as i32)?;
+        let page = self.document.load_page(page_number as i32)?;
         let bounds = page.bounds()?;
         let width = (f64::from(bounds.x1 - bounds.x0) * f64::from(scale)).ceil();
         let height = (f64::from(bounds.y1 - bounds.y0) * f64::from(scale)).ceil();

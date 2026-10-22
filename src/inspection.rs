@@ -518,6 +518,11 @@ pub(crate) mod tests {
         .join()
         .unwrap();
         assert_eq!(worker_red, 0);
+        let saved = directory.path().join("hidden-layers.pdf");
+        document.save(&saved).unwrap();
+        let reopened = crate::document::PdfDocument::open(&saved).unwrap();
+        assert_eq!(red(reopened.render_at_scale(0, 1.0).unwrap()), 2100);
+        assert_eq!(reopened.page_text(0).unwrap(), "Draft text");
         layers[0].enabled = true;
         document.set_layer_visibility(&layers).unwrap();
         assert_eq!(red(document.render_at_scale(0, 1.0).unwrap()), 2100);
