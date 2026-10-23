@@ -525,6 +525,29 @@ impl TextBlock<'_> {
         self.inner.bbox.into()
     }
 
+    /// Immediate children of a structure block, in native reading order.
+    /// Non-structure blocks and unresolved structures have no children.
+    pub fn children(&self) -> TextBlockIter<'_> {
+        let next = if self.inner.type_ == FZ_STEXT_BLOCK_STRUCT as c_int {
+            // The union member is valid only for structure blocks. The page
+            // owns both the structure and its children for this borrow.
+            unsafe {
+                self.inner
+                    .u
+                    .s
+                    .down
+                    .as_ref()
+                    .map_or(ptr::null_mut(), |s| s.first_block)
+            }
+        } else {
+            ptr::null_mut()
+        };
+        TextBlockIter {
+            next,
+            _marker: PhantomData,
+        }
+    }
+
     pub fn lines(&self) -> TextLineIter<'_> {
         unsafe {
             if self.inner.type_ == FZ_STEXT_BLOCK_TEXT as c_int {
@@ -591,6 +614,11 @@ impl TextLine<'_> {
         self.inner.bbox.into()
     }
 
+    /// Normalized baseline direction, independent of character bidi levels.
+    pub fn direction(&self) -> Point {
+        self.inner.dir.into()
+    }
+
     pub fn wmode(&self) -> WriteMode {
         (self.inner.wmode as u32).try_into().unwrap()
     }
@@ -632,6 +660,11 @@ pub struct TextChar<'a> {
 impl TextChar<'_> {
     pub fn char(&self) -> Option<char> {
         std::char::from_u32(self.inner.c as u32)
+    }
+
+    /// Unicode bidi level: even for LTR, odd for RTL.
+    pub fn bidi(&self) -> u16 {
+        self.inner.bidi
     }
 
     pub fn origin(&self) -> Point {

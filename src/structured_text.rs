@@ -6,7 +6,7 @@
 
 use std::ops::Range;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub type Quad = [[f32; 2]; 4];
@@ -40,67 +40,81 @@ pub struct Hit {
 }
 
 impl PageText {
-    /// XML is MuPDF 0.8's safe API for nested segmented regions and bidi levels;
-    /// its structured() helper omits both. Descendants traverse regions in order.
-    pub fn from_xml(xml: &str, bounds: mupdf::Rect) -> Result<Self> {
+    /// Copy native text in depth-first region order. No native handles escape
+    /// this conversion, so selection and accessibility can outlive the page.
+    pub fn from_native(text: &mupdf::TextPage, bounds: mupdf::Rect) -> Result<Self> {
         let size = [bounds.x1 - bounds.x0, bounds.y1 - bounds.y0];
         ensure!(
             size.iter().all(|v| v.is_finite() && *v > 0.0),
             "invalid page bounds"
         );
-        let xml = roxmltree::Document::parse(xml).context("invalid MuPDF text XML")?;
         let mut page = Self {
             size,
             ..Self::default()
         };
-        for block in xml.descendants().filter(|node| node.has_tag_name("block")) {
-            let start = page.chars.len();
-            for line in block.children().filter(|node| node.has_tag_name("line")) {
-                let start = page.chars.len();
-                let direction =
-                    numbers::<2>(line.attribute("dir").context("missing line direction")?)?;
-                for ch in line.descendants().filter(|node| node.has_tag_name("char")) {
-                    let value = ch.attribute("c").context("missing character")?;
-                    let coordinates =
-                        numbers::<8>(ch.attribute("quad").context("missing character quad")?)?;
-                    let points = [
-                        [coordinates[0], coordinates[1]],
-                        [coordinates[2], coordinates[3]],
-                        [coordinates[6], coordinates[7]],
-                        [coordinates[4], coordinates[5]],
-                    ];
-                    let quad = points
-                        .map(|p| [(p[0] - bounds.x0) / size[0], (p[1] - bounds.y0) / size[1]]);
-                    let bidi = ch
-                        .attribute("bidi")
-                        .context("missing bidi level")?
-                        .parse()?;
-                    for ch in value.chars() {
-                        page.chars.push(TextChar {
-                            ch,
-                            quad: Some(quad),
-                            bidi,
-                        });
-                    }
-                }
-                if page.chars.len() > start {
-                    page.lines.push(TextLine {
-                        chars: start..page.chars.len(),
-                        direction,
-                    });
-                    page.separator();
-                }
-            }
-            if page.chars.len() > start {
-                page.paragraphs.push(start..page.chars.len() - 1);
-                page.separator();
-            }
-        }
+        page.append_blocks(text.blocks(), bounds)?;
         // No artificial trailing blank line in clipboard/accessibility text.
         while page.chars.last().is_some_and(|ch| ch.quad.is_none()) {
             page.chars.pop();
         }
         Ok(page)
+    }
+
+    fn append_blocks(
+        &mut self,
+        blocks: mupdf::text_page::TextBlockIter<'_>,
+        bounds: mupdf::Rect,
+    ) -> Result<()> {
+        for block in blocks {
+            if block.r#type() == mupdf::text_page::TextBlockType::Struct {
+                self.append_blocks(block.children(), bounds)?;
+                continue;
+            }
+            let start = self.chars.len();
+            for line in block.lines() {
+                let start = self.chars.len();
+                let direction = line.direction();
+                let direction = [direction.x, direction.y];
+                ensure!(
+                    direction.iter().all(|v| v.is_finite()),
+                    "invalid text geometry"
+                );
+                for ch in line.chars() {
+                    let quad = ch.quad();
+                    // Native quads are UL, UR, LL, LR; consumers use perimeter order.
+                    let points = [quad.ul, quad.ur, quad.lr, quad.ll];
+                    ensure!(
+                        points.iter().all(|p| p.x.is_finite() && p.y.is_finite()),
+                        "invalid text geometry"
+                    );
+                    let quad = points.map(|p| {
+                        [
+                            (p.x - bounds.x0) / self.size[0],
+                            (p.y - bounds.y0) / self.size[1],
+                        ]
+                    });
+                    self.chars.push(TextChar {
+                        // Preserve valid scalars, including XML-forbidden controls.
+                        // A non-Unicode native CID/GID has no Rust char equivalent.
+                        ch: ch.char().unwrap_or(char::REPLACEMENT_CHARACTER),
+                        quad: Some(quad),
+                        bidi: ch.bidi(),
+                    });
+                }
+                if self.chars.len() > start {
+                    self.lines.push(TextLine {
+                        chars: start..self.chars.len(),
+                        direction,
+                    });
+                    self.separator();
+                }
+            }
+            if self.chars.len() > start {
+                self.paragraphs.push(start..self.chars.len() - 1);
+                self.separator();
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn separator(&mut self) {
@@ -182,18 +196,6 @@ impl PageText {
             caret: if after { cluster.end } else { cluster.start },
         })
     }
-}
-
-fn numbers<const N: usize>(value: &str) -> Result<[f32; N]> {
-    let values: Vec<f32> = value
-        .split_whitespace()
-        .map(str::parse)
-        .collect::<Result<_, _>>()?;
-    ensure!(
-        values.len() == N && values.iter().all(|v| v.is_finite()),
-        "invalid text geometry"
-    );
-    Ok(values.try_into().unwrap())
 }
 
 fn distance(point: [f32; 2], quad: Quad) -> f32 {
@@ -323,33 +325,55 @@ pub(crate) mod tests {
         let page = extract(&multilingual_pdf());
         assert_eq!(page.plain_text(), "e\u{301} 中文 אב");
         assert_eq!(page.grapheme(1), 0..2);
+        assert_eq!(page.word(1), 0..2);
+        assert_eq!(page.word(3), 3..4);
+        assert_eq!(page.word(7), 6..8);
+        assert_eq!(page.paragraph(4), 0..8);
         assert!(page.chars.iter().filter(|ch| ch.quad.is_some()).count() >= 8);
     }
 
     #[test]
-    fn unicode_bidi_graphemes_words_and_nested_regions_are_preserved() {
-        // The XML parser must descend segment regions, decode entities and keep
-        // logical RTL order. Geometry puts logical alef to the right of bet.
-        let xml = r#"<page><struct><block><line dir="1 0"><font>
-            <char c="א" bidi="1" quad="60 10 70 10 60 20 70 20"/>
-            <char c="ב" bidi="1" quad="50 10 60 10 50 20 60 20"/>
-            <char c=" " bidi="0" quad="70 10 80 10 70 20 80 20"/>
-            <char c="e" bidi="0" quad="80 10 90 10 80 20 90 20"/>
-            <char c="&#x301;" bidi="0" quad="80 10 90 10 80 20 90 20"/>
-            <char c="中" bidi="0" quad="90 10 100 10 90 20 100 20"/>
-            <char c="文" bidi="0" quad="100 10 110 10 100 20 110 20"/>
-            <char c="&amp;" bidi="0" quad="110 10 120 10 110 20 120 20"/>
-            </font></line></block></struct></page>"#;
-        let page = PageText::from_xml(xml, mupdf::Rect::new(0.0, 0.0, 200.0, 100.0)).unwrap();
-        assert_eq!(page.plain_text(), "אב e\u{301}中文&");
+    fn native_bidi_keeps_logical_order_and_reverses_caret_edges() {
+        // Map real glyphs rather than ActualText so the PDF interpreter assigns
+        // bidi levels. Logical alef is positioned to the right of bet.
+        let content = "BT /F1 16 Tf 60 350 Td (A) Tj -10 0 Td (B) Tj ET";
+        let cmap = "begincmap 2 beginbfchar <41> <05D0> <42> <05D1> endbfchar endcmap";
+        let bytes = crate::document::tests::pdf_objects(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [10 20 310 420] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".into(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>".into(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+            format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len()),
+        ]);
+        let page = extract(&bytes);
+        assert_eq!(page.plain_text(), "אב");
+        assert_eq!(
+            page.chars.iter().map(|c| c.bidi).collect::<Vec<_>>(),
+            [1, 1]
+        );
         assert_eq!(page.word(1), 0..2);
-        assert_eq!(page.word(4), 3..5);
-        assert_eq!(page.grapheme(4), 3..5);
-        assert_eq!(page.word(5), 5..6);
-        assert_eq!(page.paragraph(6), 0..8);
-        assert_eq!(page.hit([0.34, 0.15]).unwrap().caret, 0);
-        assert_eq!(page.hit([0.31, 0.15]).unwrap().caret, 1);
-        assert_eq!(page.hit([0.44, 0.15]).unwrap().caret, 5);
+        let quad = page.chars[0].quad.unwrap();
+        let center = [
+            quad.iter().map(|p| p[0]).sum::<f32>() / 4.0,
+            quad.iter().map(|p| p[1]).sum::<f32>() / 4.0,
+        ];
+        assert_eq!(page.hit([center[0] + 0.002, center[1]]).unwrap().caret, 0);
+        assert_eq!(page.hit([center[0] - 0.002, center[1]]).unwrap().caret, 1);
+    }
+
+    #[test]
+    fn native_text_preserves_xml_forbidden_controls_and_supplementary_unicode() {
+        let page = extract(&sample_pdf(
+            "/Span << /ActualText <FEFF004100010026003C003ED83DDE00> >> BDC
+            BT /F1 16 Tf 40 350 Td (mapped) Tj ET EMC",
+            false,
+        ));
+        assert_eq!(page.plain_text(), "A\u{1}&<>😀");
+        assert_eq!(page.chars.len(), 6);
+        assert!(page.chars.iter().all(|c| c.quad.is_some()));
+        assert_eq!(page.lines[0].chars, 0..6);
+        assert_eq!(page.paragraph(5), 0..6);
     }
 
     #[test]

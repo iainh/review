@@ -49,6 +49,13 @@ printing, encryption and saving with the original layer defaults preserved.
 serialized length. It still copies the native buffer and releases it through
 MuPDF's allocator; it does not transfer allocator ownership or provide zero-copy
 output. Review's isolated edit candidate uses this API with `Encryption::Keep`.
+`TextBlock::children`, `TextLine::direction` and `TextChar::bidi` expose borrowed
+native structured-text data. Review copies it directly into its owned page-text
+model in depth-first region order, without XML serialization or parsing. The
+upstream `structured()` helper omits nested regions and bidi levels, so it is
+not used for this conversion. XML/XHTML output APIs remain unchanged. Native
+PDF tests cover columns, rotated baselines, RTL caret edges, Unicode and
+XML-forbidden control characters.
 Remove these patches when upstream provides equivalent safe APIs and fixes
 permission conversion; keep their regression tests.
 

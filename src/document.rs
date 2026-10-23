@@ -592,7 +592,7 @@ impl PdfDocument {
         let bounds = page.bounds()?;
         let text = page.to_text_page(TextPageFlags::SEGMENT | TextPageFlags::PARAGRAPH_BREAK)?;
         let text = Arc::new(
-            crate::structured_text::PageText::from_xml(&text.to_xml(page_number as i32)?, bounds)
+            crate::structured_text::PageText::from_native(&text, bounds)
                 .with_context(|| format!("failed to extract text from page {}", page_number + 1))?,
         );
         let mut cache = self.native_text.lock().unwrap();
