@@ -892,14 +892,34 @@ impl PdfDocument {
     }
 
     pub fn render_at_scale(&self, page_number: usize, scale: f32) -> Result<PageImage> {
-        let pixmap = self.raster_at_scale(page_number, scale)?;
+        ensure!(page_number < self.page_count, "page is out of range");
+        ensure!(scale.is_finite() && scale > 0.0, "invalid rendering scale");
+        let page = self.document.load_page(page_number as i32)?;
+        let bounds = page.bounds()?;
+        let page_width = bounds.x1 - bounds.x0;
+        let page_height = bounds.y1 - bounds.y0;
+        ensure!(
+            page_width > 0.0 && page_height > 0.0,
+            "page has invalid bounds"
+        );
+        ensure!(
+            (page_width * scale).ceil() * (page_height * scale).ceil() <= 64_000_000.0,
+            "This zoom exceeds the page rendering memory limit; reduce the zoom"
+        );
+        let matrix = Matrix::new_scale(scale, scale);
+        let area = bounds.transform(&matrix).round();
+        let width = (area.x1 - area.x0) as usize;
+        let height = (area.y1 - area.y0) as usize;
+        let mut image = egui::ColorImage::filled([width, height], egui::Color32::WHITE);
+        // Match MuPDF's full-page helper: put scale on the draw device, not
+        // the page run. Moving it can change fractional-scale image sampling.
+        mupdf::Device::with_rgba_samples(image.as_raw_mut(), area, &matrix, |device| {
+            page.run(device, &Matrix::IDENTITY)
+        })?;
         Ok(PageImage {
-            width: pixmap.width(),
-            height: pixmap.height(),
-            pixels: Arc::new(egui::ColorImage::from_rgb(
-                [pixmap.width() as usize, pixmap.height() as usize],
-                pixmap.samples(),
-            )),
+            width: width as u32,
+            height: height as u32,
+            pixels: Arc::new(image),
         })
     }
 
@@ -1060,6 +1080,68 @@ pub(crate) mod tests {
     use super::{PdfDocument, fit_scale};
     use mupdf::pdf::{Encryption, PdfWriteOptions, Permission};
     use std::sync::Arc;
+
+    #[test]
+    fn borrowed_rgba_draws_into_caller_samples_at_nonzero_origin() {
+        use mupdf::{ColorParams, Colorspace, Device, IRect, Matrix, Path};
+        let mut samples = [255; 24];
+        let mut path = Path::new().unwrap();
+        path.rect(10.0, 20.0, 12.0, 21.0).unwrap();
+        Device::with_rgba_samples(
+            &mut samples,
+            IRect::new(10, 20, 13, 22),
+            &Matrix::IDENTITY,
+            |device| {
+                device.fill_path(
+                    &path,
+                    false,
+                    &Matrix::IDENTITY,
+                    &Colorspace::device_rgb(),
+                    &[0.2, 0.4, 0.6],
+                    1.0,
+                    ColorParams::default(),
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(&samples[..8], &[51, 102, 153, 255, 51, 102, 153, 255]);
+        assert_eq!(&samples[8..], &[255; 16]);
+    }
+
+    #[test]
+    fn borrowed_rgba_releases_the_borrow_after_errors_and_unwinding() {
+        use mupdf::{Device, Error, IRect, Matrix, Path};
+        let mut samples = [255; 24];
+        let bounds = IRect::new(10, 20, 13, 22);
+        let invalid =
+            Device::with_rgba_samples(&mut samples[..23], bounds, &Matrix::IDENTITY, |_| {
+                Ok::<_, Error>(())
+            });
+        assert!(matches!(invalid, Err(Error::InvalidArgument(_))));
+        let mut path = Path::new().unwrap();
+        path.rect(10.0, 20.0, 12.0, 21.0).unwrap();
+        // Native close throws for an unfinished clip. It must become a Rust
+        // error, never longjmp through Rust or leave the samples borrowed.
+        let unfinished =
+            Device::with_rgba_samples(&mut samples, bounds, &Matrix::IDENTITY, |device| {
+                device.clip_path(&path, false, &Matrix::IDENTITY)
+            });
+        assert!(unfinished.is_err());
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(), Error> =
+                Device::with_rgba_samples(&mut samples, bounds, &Matrix::IDENTITY, |device| {
+                    device.clip_path(&path, false, &Matrix::IDENTITY)?;
+                    panic!("interrupted drawing");
+                });
+        }));
+        assert!(panic.is_err());
+        samples.fill(0);
+        Device::with_rgba_samples(&mut samples, bounds, &Matrix::IDENTITY, |_| {
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+        assert_eq!(samples, [0; 24]);
+    }
 
     #[test]
     fn shared_pdf_bytes_survive_native_handles_and_release_after_errors() {

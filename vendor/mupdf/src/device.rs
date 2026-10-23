@@ -225,6 +225,81 @@ impl Device {
         Self::from_pixmap_with_clip(pixmap, IRect::INF)
     }
 
+    /// Draw synchronously into borrowed, tightly packed RGBA samples.
+    /// The caller initializes the background (MuPDF uses premultiplied alpha).
+    /// Neither the pixmap nor its device can outlive the exclusive slice borrow.
+    pub fn with_rgba_samples<T, E: From<Error>>(
+        samples: &mut [u8],
+        bounds: IRect,
+        transform: &Matrix,
+        draw: impl FnOnce(&Device) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let width = i64::from(bounds.x1) - i64::from(bounds.x0);
+        let height = i64::from(bounds.y1) - i64::from(bounds.y0);
+        if width <= 0
+            || height <= 0
+            || width > i64::from(i32::MAX / 4)
+            || height > i64::from(i32::MAX)
+            || width.checked_mul(height).and_then(|n| n.checked_mul(4))
+                != i64::try_from(samples.len()).ok()
+        {
+            return Err(Error::InvalidArgument("invalid RGBA sample bounds".into()).into());
+        }
+        unsafe extern "C" {
+            fn review_rgba_pixmap(
+                ctx: *mut fz_context,
+                bounds: fz_irect,
+                samples: *mut u8,
+                error: *mut *mut mupdf_error_t,
+            ) -> *mut fz_pixmap;
+            fn review_draw_device(
+                ctx: *mut fz_context,
+                pixmap: *mut fz_pixmap,
+                transform: fz_matrix,
+                error: *mut *mut mupdf_error_t,
+            ) -> *mut fz_device;
+            fn review_close_draw_device(
+                ctx: *mut fz_context,
+                device: *mut fz_device,
+                error: *mut *mut mupdf_error_t,
+            );
+        }
+        // Closing can throw when drawing leaves an unfinished clip/group.
+        // Drop only releases native ownership; close explicitly in C on success.
+        struct BorrowedDraw(Device);
+        impl Drop for BorrowedDraw {
+            fn drop(&mut self) {
+                let raw = std::mem::replace(&mut self.0.dev, ptr::null_mut());
+                unsafe { fz_drop_device(context(), raw) };
+            }
+        }
+        // SAFETY: Length/stride arithmetic is checked above. The exclusive slice
+        // stays borrowed through draw and both native drops, including unwind.
+        // The C shim catches MuPDF exceptions. External samples are not freed
+        // by MuPDF. Only a borrowed Device is exposed, never the Pixmap (whose
+        // clone could otherwise retain the samples beyond this call).
+        let pixmap = unsafe {
+            Pixmap::from_raw(ffi_try!(review_rgba_pixmap(
+                context(),
+                bounds.into(),
+                samples.as_mut_ptr()
+            ))?)
+        };
+        let device = BorrowedDraw(unsafe {
+            Self::from_raw(
+                ffi_try!(review_draw_device(
+                    context(),
+                    pixmap.inner,
+                    transform.into()
+                ))?,
+                ptr::null_mut(),
+            )
+        });
+        let output = draw(&device.0)?;
+        unsafe { ffi_try!(review_close_draw_device(context(), device.0.dev))? };
+        Ok(output)
+    }
+
     /// Creates a device that records drawing commands into `list`.
     ///
     /// The returned device keeps `list` mutably borrowed until it is dropped, so safe Rust code

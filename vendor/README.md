@@ -102,3 +102,28 @@ policy, as in upstream. The AppKit view is borrowed from the live winit window;
 there is no cached pointer or title-based window lookup. Remove this adaptation
 when upstream supports the current egui generation and host-managed
 shortcuts/root-Ui rendering.
+
+# Borrowed RGBA raster target
+
+`Device::with_rgba_samples` in `mupdf/src/device.rs` lends a checked, initialized
+Rust RGBA slice to MuPDF for one synchronous callback. The small C shim in
+`mupdf/native/review.c` wraps external-sample pixmap creation, transformed draw
+device creation and device close in MuPDF exception boundaries. It uses the
+MuPDF 1.27.2 ABI already pinned by `mupdf-sys` 0.8.0; the native core is unchanged.
+
+Only a borrowed device reaches the callback, never a clonable pixmap. The device
+is dropped before the pixmap and both are dropped before the slice borrow ends,
+including on callback errors and Rust unwinding. Native close errors become
+Rust errors; unwinding drops without trying to close an unfinished drawing.
+MuPDF does not free externally supplied samples. Length, signed dimensions and
+four-byte stride are checked before FFI. No native allocation is adopted as a
+Rust `Vec`, and no uninitialized `Color32` values are exposed.
+
+Review initializes the target to opaque white, retaining its existing page
+compositing semantics. Full pages draw directly into the final `ColorImage`.
+This removes the separate full-page RGB sample buffer and conversion, not GPU
+uploads. Full pages retain MuPDF's device transform: moving the scale to the
+page run can change fractional-scale image sampling. The tile prototype's
+in-place guarded crop did not show a consistent end-to-end benefit, so tiles
+retain their existing RGB raster, guards, conversion and cache accounting.
+Printing and OCR also retain the existing native opaque RGB path.

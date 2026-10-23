@@ -55,3 +55,47 @@ void review_set_layers(fz_context *ctx, pdf_document *document, size_t count,
     fz_catch(ctx)
         mupdf_save_error(ctx, errptr);
 }
+
+typedef struct fz_pixmap fz_pixmap;
+typedef struct fz_colorspace fz_colorspace;
+typedef struct fz_separations fz_separations;
+typedef struct fz_device fz_device;
+fz_colorspace *fz_device_rgb(fz_context *);
+fz_pixmap *fz_new_pixmap_with_bbox_and_data(fz_context *, fz_colorspace *,
+    fz_irect, fz_separations *, int, unsigned char *);
+fz_device *fz_new_draw_device(fz_context *, fz_matrix, fz_pixmap *);
+void fz_close_device(fz_context *, fz_device *);
+
+fz_pixmap *review_rgba_pixmap(fz_context *ctx, fz_irect bbox,
+    unsigned char *samples, mupdf_error_t **errptr)
+{
+    fz_pixmap *pixmap = NULL;
+    fz_var(pixmap);
+    fz_try(ctx)
+        pixmap = fz_new_pixmap_with_bbox_and_data(ctx, fz_device_rgb(ctx),
+            bbox, NULL, 1, samples);
+    fz_catch(ctx)
+        mupdf_save_error(ctx, errptr);
+    return pixmap;
+}
+
+fz_device *review_draw_device(fz_context *ctx, fz_pixmap *pixmap,
+    fz_matrix transform, mupdf_error_t **errptr)
+{
+    fz_device *device = NULL;
+    fz_var(device);
+    fz_try(ctx)
+        device = fz_new_draw_device(ctx, transform, pixmap);
+    fz_catch(ctx)
+        mupdf_save_error(ctx, errptr);
+    return device;
+}
+
+void review_close_draw_device(fz_context *ctx, fz_device *device,
+    mupdf_error_t **errptr)
+{
+    fz_try(ctx)
+        fz_close_device(ctx, device);
+    fz_catch(ctx)
+        mupdf_save_error(ctx, errptr);
+}
