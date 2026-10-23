@@ -513,7 +513,10 @@ from_enum! { c_int => c_int,
 
 /// A text block is a list of lines of text (typically a paragraph), or an image.
 pub struct TextBlock<'a> {
-    inner: &'a fz_stext_block,
+    // MuPDF's x86-64 pool may align nodes to only four bytes. Keep an aligned
+    // value snapshot, not a Rust reference to the underaligned native node.
+    inner: fz_stext_block,
+    _page: PhantomData<&'a TextPage>,
 }
 
 impl TextBlock<'_> {
@@ -530,14 +533,16 @@ impl TextBlock<'_> {
     pub fn children(&self) -> TextBlockIter<'_> {
         let next = if self.inner.type_ == FZ_STEXT_BLOCK_STRUCT as c_int {
             // The union member is valid only for structure blocks. The page
-            // owns both the structure and its children for this borrow.
+            // owns both the structure and its children for this borrow. Read
+            // just the field: structure nodes are underaligned and have a
+            // variable-sized trailing name, not necessarily a full Rust struct.
             unsafe {
-                self.inner
-                    .u
-                    .s
-                    .down
-                    .as_ref()
-                    .map_or(ptr::null_mut(), |s| s.first_block)
+                let down = self.inner.u.s.down;
+                if down.is_null() {
+                    ptr::null_mut()
+                } else {
+                    ptr::addr_of!((*down).first_block).read_unaligned()
+                }
             }
         } else {
             ptr::null_mut()
@@ -597,16 +602,22 @@ impl<'a> Iterator for TextBlockIter<'a> {
         if self.next.is_null() {
             return None;
         }
-        let node = unsafe { &*self.next };
+        // Native pool storage is valid for the page lifetime but may not meet
+        // Rust's alignment requirement for a reference to this C struct.
+        let node = unsafe { self.next.read_unaligned() };
         self.next = node.next;
-        Some(TextBlock { inner: node })
+        Some(TextBlock {
+            inner: node,
+            _page: PhantomData,
+        })
     }
 }
 
 /// A text line is a list of characters that share a common baseline.
 #[derive(Debug)]
 pub struct TextLine<'a> {
-    inner: &'a fz_stext_line,
+    inner: fz_stext_line,
+    _page: PhantomData<&'a TextPage>,
 }
 
 impl TextLine<'_> {
@@ -644,9 +655,13 @@ impl<'a> Iterator for TextLineIter<'a> {
         if self.next.is_null() {
             return None;
         }
-        let node = unsafe { &*self.next };
+        // Lines share the same potentially underaligned page pool as blocks.
+        let node = unsafe { self.next.read_unaligned() };
         self.next = node.next;
-        Some(TextLine { inner: node })
+        Some(TextLine {
+            inner: node,
+            _page: PhantomData,
+        })
     }
 }
 
@@ -654,7 +669,8 @@ impl<'a> Iterator for TextLineIter<'a> {
 /// and the point at which it is positioned.
 #[derive(Debug)]
 pub struct TextChar<'a> {
-    inner: &'a fz_stext_char,
+    inner: fz_stext_char,
+    _page: PhantomData<&'a TextPage>,
 }
 
 impl TextChar<'_> {
@@ -715,9 +731,13 @@ impl<'a> Iterator for TextCharIter<'a> {
         if self.next.is_null() {
             return None;
         }
-        let node = unsafe { &*self.next };
+        // Characters share the same potentially underaligned page pool.
+        let node = unsafe { self.next.read_unaligned() };
         self.next = node.next;
-        Some(TextChar { inner: node })
+        Some(TextChar {
+            inner: node,
+            _page: PhantomData,
+        })
     }
 }
 

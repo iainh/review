@@ -56,6 +56,13 @@ upstream `structured()` helper omits nested regions and bidi levels, so it is
 not used for this conversion. XML/XHTML output APIs remain unchanged. Native
 PDF tests cover columns, rotated baselines, RTL caret edges, Unicode and
 XML-forbidden control characters.
+Native text-pool nodes can be only four-byte aligned on x86-64, even when the
+C type's ABI requires eight-byte alignment. Block, line and character iterators
+read unaligned value snapshots while retaining the page lifetime, rather than
+constructing Rust references to native nodes. Structure children use an
+unaligned field read because their trailing names are variable-sized. The
+existing huge-page text/link test reproduces the invalid-reference abort in a
+debug build without this correction; both debug and release suites cover it.
 Remove these patches when upstream provides equivalent safe APIs and fixes
 permission conversion; keep their regression tests.
 
