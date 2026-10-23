@@ -300,7 +300,7 @@ impl PdfDocument {
         );
         ensure!(!self.has_xfa()?, "XFA forms are not supported");
         ensure!(number < self.page_count(), "page is out of range");
-        self.edit(|document| {
+        self.edit(move |document| {
             let mut page = document.load_pdf_page(number as i32)?;
             let mut widget = page
                 .load_widget(xref)?
@@ -427,9 +427,41 @@ pub struct Forms {
     page: Option<usize>,
     fields: Vec<Field>,
     focus: Option<i32>,
+    // A single latest value, not a keystroke queue. While its predecessor is
+    // running only this field accepts more input; other mutations wait.
+    pending: Option<(usize, i32, Value)>,
+    editing: Option<(usize, i32, Value)>,
 }
 
 impl Forms {
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub fn cancel_pending(&mut self) {
+        self.pending = None;
+        self.editing = None;
+        self.invalidate();
+    }
+
+    pub fn flush(&mut self, document: &mut PdfDocument) -> Result<bool> {
+        if document.pending_operation().is_some() {
+            return Ok(false);
+        }
+        self.editing = None;
+        let Some((page, xref, value)) = self.pending.take() else {
+            return Ok(false);
+        };
+        let result = document.set_form_value(page, xref, value.clone());
+        if result.is_ok() && document.pending_operation().is_some() {
+            self.editing = Some((page, xref, value));
+        } else {
+            self.invalidate();
+        }
+        result?;
+        Ok(true)
+    }
+
     pub fn invalidate(&mut self) {
         self.page = None;
     }
@@ -438,6 +470,23 @@ impl Forms {
         if self.page != Some(document.current_page()) {
             self.fields = document.form_fields(document.current_page())?;
             self.page = Some(document.current_page());
+            if let Some((page, xref, value)) = self.pending.as_ref().or(self.editing.as_ref())
+                && Some(*page) == self.page
+                && let Some(field) = self.fields.iter_mut().find(|field| field.xref == *xref)
+            {
+                match value {
+                    Value::Text(value) => field.value = value.clone(),
+                    Value::Toggle(checked) => field.checked = *checked,
+                    Value::Choice(indices) => {
+                        field.selected = indices.clone();
+                        if let Some(choice) =
+                            indices.first().and_then(|index| field.choices.get(*index))
+                        {
+                            field.value = choice.export.clone();
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -494,7 +543,9 @@ impl Forms {
                 for field in &mut self.fields {
                     ui.push_id(field.xref, |ui| {
                         let label = ui.label(format!("{}{}{}", field.label, if field.flags.contains(FieldFlags::REQUIRED) { " · required" } else { "" }, if field.editable { "" } else { " · read-only" }));
-                        ui.add_enabled_ui(field.editable, |ui| {
+                        let accepts_input = document.pending_operation().is_none()
+                            || self.editing.as_ref().is_some_and(|(page, xref, _)| (*page, *xref) == (document.current_page(), field.xref));
+                        ui.add_enabled_ui(field.editable && accepts_input, |ui| {
                             let id = prefix.with(field.xref);
                             let response = match field.kind {
                                 Kind::Text => {
@@ -570,12 +621,9 @@ impl Forms {
         }
         if let Some((xref, value)) = change {
             before_edit();
-            let result = document.set_form_value(document.current_page(), xref, value);
-            self.invalidate();
-            result?;
-            return Ok(true);
+            self.pending = Some((document.current_page(), xref, value));
         }
-        Ok(false)
+        self.flush(document)
     }
 
     pub fn page_ui(

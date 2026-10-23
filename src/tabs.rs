@@ -35,6 +35,17 @@ impl Tabs {
         self.active.map(|index| self.entries[index].id)
     }
 
+    pub fn viewers_mut<'a>(
+        &'a mut self,
+        active: &'a mut Option<Viewer>,
+    ) -> impl Iterator<Item = &'a mut Viewer> {
+        active.iter_mut().chain(
+            self.entries
+                .iter_mut()
+                .filter_map(|tab| tab.viewer.as_mut()),
+        )
+    }
+
     pub fn is_dirty(&self, id: u64, active: Option<&Viewer>) -> bool {
         if Some(id) == self.active_id() {
             active.is_some_and(Viewer::is_dirty)
@@ -90,6 +101,15 @@ impl Tabs {
     }
 
     pub fn capture(&mut self, viewer: Option<&Viewer>) {
+        for tab in &mut self.entries {
+            if let Some(viewer) = &tab.viewer {
+                tab.file = SessionFile {
+                    path: viewer.state_key().to_path_buf(),
+                    reading: viewer.reading_state(),
+                    sidebar: viewer.sidebar_state(),
+                };
+            }
+        }
         if let Some(viewer) = viewer {
             let file = SessionFile {
                 path: viewer.state_key().to_path_buf(),

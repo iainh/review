@@ -2,7 +2,7 @@ use egui::{Color32, Context, Key, Modifiers};
 
 use crate::{
     annotations::{AnnotationUi, Kind},
-    document::PdfDocument,
+    document::{Operation, PdfDocument},
     forms::Forms,
     icons::{self, Icon},
     inspector::Inspector,
@@ -48,6 +48,8 @@ pub struct Viewer {
     annotations: AnnotationUi,
     forms: Forms,
     pub save_requested: Option<bool>,
+    pub save_completed: Option<bool>,
+    saving_path: Option<std::path::PathBuf>,
 }
 
 impl Drop for Viewer {
@@ -102,6 +104,8 @@ impl Viewer {
             annotations: AnnotationUi::default(),
             forms: Forms::default(),
             save_requested: None,
+            save_completed: None,
+            saving_path: None,
         }
     }
 
@@ -130,7 +134,37 @@ impl Viewer {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.document.is_dirty()
+        self.document.is_dirty() || self.forms.has_pending()
+    }
+
+    pub fn start_background(&mut self, ctx: Context) {
+        self.document.start_background(ctx);
+    }
+
+    pub fn busy(&self) -> bool {
+        self.document.pending_operation().is_some() || self.forms.has_pending()
+    }
+
+    pub fn saving_path(&self) -> Option<&std::path::Path> {
+        self.saving_path.as_deref()
+    }
+
+    pub fn poll_operations(&mut self, ctx: &Context) {
+        if let Some((operation, result)) = self.document.poll_background() {
+            if operation == Operation::Save {
+                self.save_completed = Some(result.is_ok());
+                self.saved(result);
+            } else {
+                if result.is_err() {
+                    self.forms.cancel_pending();
+                    self.annotations.cancel_pending();
+                }
+                self.edited(result, ctx);
+            }
+        }
+        if let Err(error) = self.forms.flush(&mut self.document) {
+            self.edited(Err(error), ctx);
+        }
     }
 
     pub fn save(&mut self, save_as: bool) -> bool {
@@ -142,6 +176,10 @@ impl Viewer {
         save_as: bool,
         open_paths: &[std::path::PathBuf],
     ) -> bool {
+        if self.busy() {
+            self.error = Some("Wait for the current document operation before saving.".into());
+            return false;
+        }
         let path = if save_as {
             let mut chooser = rfd::FileDialog::new()
                 .set_title("Save PDF As")
@@ -169,7 +207,18 @@ impl Viewer {
             self.error = Some("That PDF is already open in another tab. Close that tab or choose another destination.".into());
             return false;
         }
-        match self.document.save(path) {
+        let result = self.document.save(path);
+        if result.is_ok() && self.busy() {
+            self.save_completed = None;
+            self.saving_path = Some(path.to_path_buf());
+            return true;
+        }
+        self.saved(result)
+    }
+
+    fn saved(&mut self, result: anyhow::Result<()>) -> bool {
+        self.saving_path = None;
+        match result {
             Ok(()) => {
                 let key = crate::persistence::file_key(self.path());
                 if self.state_key != key {
@@ -201,6 +250,7 @@ impl Viewer {
 
     fn edited(&mut self, result: anyhow::Result<()>, ctx: &Context) {
         match result {
+            Ok(()) if self.document.pending_operation().is_some() => {}
             Ok(()) => {
                 self.ocr.cancel();
                 self.invalidate_document(ctx);
@@ -655,7 +705,7 @@ impl Viewer {
                     let result = self.document.redo();
                     self.edited(result, &ctx);
                 }
-                if icons::button(ui, Icon::Save, "Save (Ctrl+S / Cmd+S)").clicked() {
+                if ui.add_enabled_ui(!self.busy(), |ui| icons::button(ui, Icon::Save, "Save (Ctrl+S / Cmd+S)")).inner.clicked() {
                     self.save_requested = Some(false);
                 }
                 ui.menu_button("Tools", |ui| {
@@ -720,7 +770,14 @@ impl Viewer {
                         ui.close();
                     }
                 });
-                if self.document.is_dirty() {
+                if let Some(operation) = self.document.pending_operation() {
+                    ui.spinner();
+                    ui.label(if operation == Operation::Save { "Saving…" } else { "Updating…" });
+                    if ui.button("Cancel operation").clicked() {
+                        self.forms.cancel_pending();
+                        self.document.cancel_operation();
+                    }
+                } else if self.document.is_dirty() {
                     ui.colored_label(ui.visuals().warn_fg_color, "● Unsaved");
                 }
             });
@@ -734,7 +791,7 @@ impl Viewer {
                         (Kind::StrikeOut, Icon::Strikethrough),
                     ] {
                         let response = ui.add_enabled_ui(
-                            self.document.permissions().annotate && !quads.is_empty(),
+                            self.document.permissions().annotate && !self.busy() && !quads.is_empty(),
                             |ui| icons::button(ui, icon, kind.label()),
                         ).inner.on_disabled_hover_text("Select text first; this PDF must allow annotations");
                         if response.clicked() {
@@ -1271,6 +1328,123 @@ mod tests {
                 .contents,
             "keep this"
         );
+    }
+
+    #[test]
+    fn background_form_typing_keeps_latest_value_when_navigation_changes() {
+        use egui::{Key, Modifiers};
+        let mut viewer = Viewer::new(crate::forms::tests::document());
+        let ctx = egui::Context::default();
+        viewer.start_background(ctx.clone());
+        viewer.forms.open = true;
+        frame(&mut viewer, &ctx, vec![]);
+        let field_id = viewer.forms.focus_ids().next().unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(field_id));
+        frame(&mut viewer, &ctx, vec![]);
+        frame(
+            &mut viewer,
+            &ctx,
+            vec![
+                egui::Event::Key {
+                    key: Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::COMMAND,
+                },
+                egui::Event::Text("AB".into()),
+            ],
+        );
+        assert!(viewer.busy());
+        frame(&mut viewer, &ctx, vec![egui::Event::Text("CD".into())]);
+        assert!(viewer.is_dirty());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while viewer.forms.has_pending() {
+            viewer.poll_operations(&ctx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        frame(&mut viewer, &ctx, vec![]);
+        frame(&mut viewer, &ctx, vec![egui::Event::Text("E".into())]);
+        viewer.go_to_page(1);
+        while viewer.busy() {
+            viewer.poll_operations(&ctx);
+            frame(&mut viewer, &ctx, vec![]);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(viewer.error.is_none(), "{:?}", viewer.error);
+        assert_eq!(viewer.document.current_page(), 1);
+        assert_eq!(
+            viewer
+                .document
+                .form_fields(0)
+                .unwrap()
+                .into_iter()
+                .find(|field| field.xref == 10)
+                .unwrap()
+                .value,
+            "ABCDE"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("latest.pdf");
+        assert!(viewer.save_to(&path, &[]));
+        while viewer.busy() {
+            viewer.poll_operations(&ctx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!viewer.is_dirty());
+        assert_eq!(
+            crate::document::PdfDocument::open(path)
+                .unwrap()
+                .form_fields(0)
+                .unwrap()
+                .into_iter()
+                .find(|field| field.xref == 10)
+                .unwrap()
+                .value,
+            "ABCDE"
+        );
+    }
+
+    #[test]
+    fn background_form_button_retains_keyboard_focus() {
+        use egui::{Key, Modifiers};
+        let mut viewer = Viewer::new(crate::forms::tests::document());
+        let ctx = egui::Context::default();
+        viewer.start_background(ctx.clone());
+        viewer.forms.open = true;
+        frame(&mut viewer, &ctx, vec![]);
+        let text = viewer.forms.focus_ids().next().unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(text));
+        frame(&mut viewer, &ctx, vec![]);
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        frame(&mut viewer, &ctx, vec![key(Key::Tab, Modifiers::NONE)]);
+        frame(&mut viewer, &ctx, vec![]);
+        let button = ctx.memory(|memory| memory.focused()).unwrap();
+        assert_ne!(button, text);
+        frame(&mut viewer, &ctx, vec![key(Key::Space, Modifiers::NONE)]);
+        assert!(viewer.busy());
+        frame(&mut viewer, &ctx, vec![]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(button));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while viewer.busy() {
+            viewer.poll_operations(&ctx);
+            frame(&mut viewer, &ctx, vec![]);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(button));
+        frame(&mut viewer, &ctx, vec![key(Key::Tab, Modifiers::SHIFT)]);
+        frame(&mut viewer, &ctx, vec![]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(text));
     }
 
     #[test]

@@ -145,7 +145,8 @@ impl PdfDocument {
         ensure!(number < self.page_count(), "page is out of range");
         validate_style(contents, colour, width)?;
         validate_geometry(kind, &geometry)?;
-        self.edit(|document| {
+        let contents = contents.to_owned();
+        self.edit(move |document| {
             let mut page = document.load_pdf_page(number as i32)?;
             let bounds = page.bounds()?;
             let point = |p: [f32; 2]| {
@@ -174,7 +175,7 @@ impl PdfDocument {
                         .map(|s| s.into_iter().map(point).collect::<Vec<_>>()),
                 )?,
             }
-            set_style(&mut annotation, contents, colour, width)?;
+            set_style(&mut annotation, &contents, colour, width)?;
             annotation.update()?;
             Ok(())
         })
@@ -194,7 +195,8 @@ impl PdfDocument {
         );
         ensure!(number < self.page_count(), "page is out of range");
         validate_style(contents, colour, width)?;
-        self.edit(|document| {
+        let contents = contents.to_owned();
+        self.edit(move |document| {
             let page = document.load_pdf_page(number as i32)?;
             let mut annotation = page
                 .annotations()
@@ -204,7 +206,7 @@ impl PdfDocument {
                 Kind::from_pdf(annotation.r#type()?).is_some() && writable(&annotation)?,
                 "Annotation is read-only or unsupported"
             );
-            set_style(&mut annotation, contents, colour, width)?;
+            set_style(&mut annotation, &contents, colour, width)?;
             annotation.update()?;
             Ok(())
         })
@@ -216,7 +218,7 @@ impl PdfDocument {
             "This PDF does not allow annotations"
         );
         ensure!(number < self.page_count(), "page is out of range");
-        self.edit(|document| {
+        self.edit(move |document| {
             let mut page = document.load_pdf_page(number as i32)?;
             let annotation = page
                 .annotations()
@@ -293,6 +295,7 @@ pub struct AnnotationUi {
     page: Option<usize>,
     entries: Vec<Annotation>,
     selected: Option<i32>,
+    created: Option<usize>,
     contents: String,
     colour: [f32; 3],
     width: f32,
@@ -307,6 +310,7 @@ impl Default for AnnotationUi {
             page: None,
             entries: Vec::new(),
             selected: None,
+            created: None,
             contents: String::new(),
             colour: [1.0, 0.8, 0.0],
             width: 2.0,
@@ -316,6 +320,10 @@ impl Default for AnnotationUi {
 }
 
 impl AnnotationUi {
+    pub fn cancel_pending(&mut self) {
+        self.created = None;
+    }
+
     pub fn invalidate(&mut self) {
         self.page = None;
         self.stroke.clear();
@@ -325,6 +333,10 @@ impl AnnotationUi {
         let page = document.current_page();
         if self.page != Some(page) {
             let entries = document.annotations(page)?;
+            if self.created == Some(page) && document.pending_operation().is_none() {
+                self.selected = entries.last().map(|entry| entry.xref);
+                self.created = None;
+            }
             if let Some(entry) = entries.iter().find(|a| Some(a.xref) == self.selected) {
                 self.contents = entry.contents.clone();
                 self.colour = entry.colour;
@@ -379,7 +391,7 @@ impl AnnotationUi {
             if !document.permissions().annotate {
                 ui.label("This PDF does not allow annotation changes.");
             }
-            ui.add_enabled_ui(document.permissions().annotate, |ui| {
+            ui.add_enabled_ui(document.permissions().annotate && document.pending_operation().is_none(), |ui| {
                 ui.horizontal_wrapped(|ui| {
                     if ui.selectable_label(self.tool.is_none(), "Select").clicked() { self.tool = None; self.stroke.clear(); }
                     for kind in [Kind::Note, Kind::Ink] {
@@ -413,7 +425,7 @@ impl AnnotationUi {
             });
             ui.separator();
             let editable = self.selected.and_then(|id| self.entries.iter().find(|a| a.xref == id)).map_or(document.permissions().annotate, |a| a.editable);
-            ui.add_enabled_ui(editable, |ui| {
+            ui.add_enabled_ui(editable && document.pending_operation().is_none(), |ui| {
                 let comment_label = ui.label("Comment");
                 ui.add(egui::TextEdit::multiline(&mut self.contents).desired_rows(5).desired_width(f32::INFINITY).id_salt("annotation_comment")).labelled_by(comment_label.id);
                 ui.horizontal(|ui| { let label = ui.label("Colour"); ui.color_edit_button_rgb(&mut self.colour).labelled_by(label.id); });
@@ -460,7 +472,7 @@ impl AnnotationUi {
         if !self.open {
             return Ok(false);
         }
-        if !ui.is_enabled() {
+        if !ui.is_enabled() || document.pending_operation().is_some() {
             self.stroke.clear();
             return Ok(false);
         }
@@ -501,6 +513,9 @@ impl AnnotationUi {
                     self.colour,
                     self.width,
                 )?;
+                if document.pending_operation().is_some() {
+                    self.created = Some(document.current_page());
+                }
                 self.tool = None;
                 self.invalidate();
                 self.refresh(document)?;

@@ -110,6 +110,7 @@ struct App {
     desktop: desktop::Desktop,
     pending: Option<PendingAction>,
     save_failed: bool,
+    waiting_for_save: bool,
 }
 
 impl App {
@@ -140,6 +141,7 @@ impl App {
             desktop: desktop::Desktop::default(),
             pending: None,
             save_failed: false,
+            waiting_for_save: false,
         }
     }
 
@@ -163,6 +165,16 @@ impl App {
         // Common exact-path duplicates need no file access. Canonicalization
         // and alias deduplication happen on completion, off the UI thread.
         if self.focus_open(&path, reading.as_ref()) {
+            return;
+        }
+        if self.tabs.viewers_mut(&mut self.viewer).any(|viewer| {
+            viewer.saving_path().is_some_and(|destination| {
+                persistence::file_key(destination) == persistence::file_key(&path)
+            })
+        }) {
+            self.open_error = Some(
+                "That PDF is being saved. Wait for the save to finish before opening it.".into(),
+            );
             return;
         }
         self.loading = Some(loading::Load::start(
@@ -269,6 +281,7 @@ impl App {
         let Some(pending) = self.pending.take() else {
             return false;
         };
+        self.waiting_for_save = false;
         self.save_failed = false;
         match decision {
             UnsavedDecision::Cancel => return false,
@@ -276,6 +289,11 @@ impl App {
                 if !self.save_current(save_as) {
                     self.pending = Some(pending);
                     self.save_failed = true;
+                    return false;
+                }
+                if self.viewer.as_ref().is_some_and(Viewer::busy) {
+                    self.pending = Some(pending);
+                    self.waiting_for_save = true;
                     return false;
                 }
             }
@@ -313,6 +331,9 @@ impl App {
     }
 
     fn finish_open(&mut self, mut viewer: Viewer, bookmark: Option<&persistence::ReadingState>) {
+        if let Some(renderer) = &self.renderer {
+            viewer.start_background(renderer.context.clone());
+        }
         self.capture_state();
         let restored = self
             .tabs
@@ -403,13 +424,21 @@ impl App {
     fn save_current(&mut self, save_as: bool) -> bool {
         self.capture_state();
         let session = self.tabs.session();
-        let open_paths: Vec<_> = session
+        let mut open_paths: Vec<_> = session
             .files
             .into_iter()
             .enumerate()
             .filter(|(index, _)| *index != session.active)
             .map(|(_, file)| file.path)
             .collect();
+        if let Some(load) = &self.loading {
+            open_paths.push(load.path.clone());
+        }
+        open_paths.extend(
+            self.tabs
+                .viewers_mut(&mut self.viewer)
+                .filter_map(|viewer| viewer.saving_path().map(std::path::Path::to_path_buf)),
+        );
         let Some(viewer) = &mut self.viewer else {
             return false;
         };
@@ -421,11 +450,47 @@ impl App {
         if !saved {
             return false;
         }
+        if viewer.busy() {
+            return true;
+        }
         self.store
             .state
             .opened(viewer.state_key().to_path_buf(), viewer.reading_state());
         self.capture_state();
         true
+    }
+
+    fn poll_operations(&mut self, ctx: &egui::Context) -> bool {
+        let mut active_save = None;
+        let has_active = self.viewer.is_some();
+        let mut saved = false;
+        for (index, viewer) in self.tabs.viewers_mut(&mut self.viewer).enumerate() {
+            viewer.poll_operations(ctx);
+            if let Some(success) = viewer.save_completed.take() {
+                if success {
+                    self.store
+                        .state
+                        .opened(viewer.state_key().to_path_buf(), viewer.reading_state());
+                    saved = true;
+                }
+                if self.waiting_for_save && has_active && index == 0 {
+                    active_save = Some(success);
+                }
+            }
+        }
+        if saved {
+            self.capture_state();
+        }
+        if let Some(success) = active_save {
+            self.waiting_for_save = false;
+            if success {
+                // No later edit was admitted while saving. Close only after
+                // that exact revision was verified and replaced on disk.
+                return self.resolve_unsaved(UnsavedDecision::Discard);
+            }
+            self.save_failed = true;
+        }
+        false
     }
 
     fn capture_state(&mut self) {
@@ -581,6 +646,16 @@ impl ApplicationHandler<AppEvent> for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if matches!(event, WindowEvent::RedrawRequested)
+            && let Some(ctx) = self
+                .renderer
+                .as_ref()
+                .map(|renderer| renderer.context.clone())
+            && self.poll_operations(&ctx)
+        {
+            event_loop.exit();
+            return;
+        }
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
@@ -609,7 +684,11 @@ impl ApplicationHandler<AppEvent> for App {
                 let mut output = renderer.context.run_ui(input, |ui| {
                     let ctx = ui.ctx().clone();
                     if unsaved_active {
-                        unsaved_decision = unsaved_ui(&ctx, self.save_failed);
+                        unsaved_decision = unsaved_ui(
+                            &ctx,
+                            self.save_failed,
+                            self.viewer.as_ref().is_some_and(Viewer::busy),
+                        );
                     }
                     let events =
                         unsaved_active.then(|| ctx.input_mut(|i| std::mem::take(&mut i.events)));
@@ -1068,7 +1147,7 @@ fn app_ui(
     )
 }
 
-fn unsaved_ui(ctx: &egui::Context, save_failed: bool) -> Option<UnsavedDecision> {
+fn unsaved_ui(ctx: &egui::Context, save_failed: bool, busy: bool) -> Option<UnsavedDecision> {
     let mut decision = None;
     egui::Modal::new(egui::Id::new("unsaved_changes")).show(ctx, |ui| {
         ui.set_width(420.0);
@@ -1082,14 +1161,23 @@ fn unsaved_ui(ctx: &egui::Context, save_failed: bool) -> Option<UnsavedDecision>
                 "The PDF was not saved. Cancel to review the error, or choose Save As.",
             );
         }
+        if busy {
+            ui.label("Waiting for the current document operation…");
+        }
         ui.horizontal(|ui| {
-            if ui.button("Save").clicked() {
+            if ui.add_enabled(!busy, egui::Button::new("Save")).clicked() {
                 decision = Some(UnsavedDecision::Save(false));
             }
-            if ui.button("Save As…").clicked() {
+            if ui
+                .add_enabled(!busy, egui::Button::new("Save As…"))
+                .clicked()
+            {
                 decision = Some(UnsavedDecision::Save(true));
             }
-            if ui.button("Discard").clicked() {
+            if ui
+                .add_enabled(!busy, egui::Button::new("Discard"))
+                .clicked()
+            {
                 decision = Some(UnsavedDecision::Discard);
             }
             if ui.button("Cancel").clicked()
@@ -1340,6 +1428,59 @@ mod tests {
             "keep this"
         );
         assert!(app.begin_close());
+    }
+
+    #[test]
+    fn background_close_waits_for_save_and_retains_failure_or_cancelled_close() {
+        for (readonly, cancel_close) in [(true, false), (false, true), (false, false)] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("close.pdf");
+            std::fs::write(&path, document::tests::sample_pdf("", false)).unwrap();
+            let mut document = document::PdfDocument::open(&path).unwrap();
+            document
+                .add_annotation(
+                    0,
+                    annotations::Kind::Note,
+                    annotations::Geometry::Note([0.4, 0.7]),
+                    "persisted",
+                    [1.0, 0.0, 0.0],
+                    1.0,
+                )
+                .unwrap();
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_readonly(readonly);
+            std::fs::set_permissions(&path, permissions).unwrap();
+            let mut app = App::with_state(persistence::Store::temporary(directory.path()), None);
+            app.finish_open(Viewer::new(document), None);
+            let ctx = egui::Context::default();
+            app.viewer.as_mut().unwrap().start_background(ctx.clone());
+            assert!(!app.begin_close());
+            assert!(!app.resolve_unsaved(UnsavedDecision::Save(false)));
+            assert!(app.pending.is_some());
+            assert!(!app.save_failed);
+            if cancel_close {
+                assert!(!app.resolve_unsaved(UnsavedDecision::Cancel));
+            }
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            let mut exit = false;
+            while app.viewer.as_ref().unwrap().busy() {
+                exit |= app.poll_operations(&ctx);
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(exit, !readonly && !cancel_close);
+            assert_eq!(app.pending.is_some(), readonly);
+            assert_eq!(app.save_failed, readonly);
+            assert_eq!(app.viewer.as_ref().unwrap().is_dirty(), readonly);
+            assert_eq!(
+                document::PdfDocument::open(&path)
+                    .unwrap()
+                    .annotations(0)
+                    .unwrap()
+                    .len(),
+                usize::from(!readonly)
+            );
+        }
     }
 
     #[test]

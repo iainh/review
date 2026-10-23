@@ -1,7 +1,11 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+    },
 };
 
 use anyhow::{Context, Result, ensure};
@@ -53,6 +57,8 @@ pub struct PdfDocument {
     history_position: usize,
     saved_revision: u64,
     next_revision: u64,
+    background: Option<Background>,
+    cancellation: Option<Arc<AtomicBool>>,
 }
 
 struct Snapshot {
@@ -86,6 +92,73 @@ pub struct WorkerSource {
     layers: Vec<(i32, bool)>,
     recognized: Arc<Mutex<RecognizedText>>,
     bytes: Arc<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    Edit,
+    Save,
+}
+
+#[derive(Clone, Copy)]
+struct EditStatus {
+    revision: u64,
+    saved: u64,
+    undo: bool,
+    redo: bool,
+}
+
+type Change = Box<dyn FnOnce(&mut PdfDocument) -> Result<()> + Send>;
+
+struct Command {
+    revision: u64,
+    operation: Operation,
+    change: Change,
+}
+
+struct Completion {
+    operation: Operation,
+    status: EditStatus,
+    source: Option<WorkerSource>,
+    result: Result<(), String>,
+}
+
+/// One admitted operation, no speculative edits and no accumulating command
+/// queue. Only owned bytes, credentials, history patches and closures cross the
+/// boundary; every native document is opened and dropped on its creator thread.
+struct Background {
+    sender: SyncSender<Command>,
+    receiver: Receiver<Completion>,
+    pending: Option<Operation>,
+    status: EditStatus,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Background {
+    fn submit(&mut self, operation: Operation, change: Change) -> Result<()> {
+        ensure!(
+            self.pending.is_none(),
+            "A document operation is still running"
+        );
+        self.cancelled.store(false, Ordering::Relaxed);
+        self.sender
+            .try_send(Command {
+                revision: self.status.revision,
+                operation,
+                change,
+            })
+            .map_err(|_| anyhow::anyhow!("Document worker is unavailable"))?;
+        self.pending = Some(operation);
+        Ok(())
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        // Never join native work on the event-loop thread. Request cancellation
+        // at the next commit checkpoint; a commit past it may still finish.
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
 }
 
 impl WorkerSource {
@@ -179,7 +252,139 @@ impl PdfDocument {
             history_position: 0,
             saved_revision: 0,
             next_revision: 1,
+            background: None,
+            cancellation: None,
         }))
+    }
+
+    fn edit_status(&self) -> EditStatus {
+        EditStatus {
+            revision: self.history[self.history_position].revision,
+            saved: self.saved_revision,
+            undo: self.history_position > 0,
+            redo: self.history_position + 1 < self.history.len(),
+        }
+    }
+
+    pub fn start_background(&mut self, ctx: egui::Context) {
+        if self.background.is_some() {
+            return;
+        }
+        let source = self.worker_source();
+        let status = self.edit_status();
+        let history = std::mem::take(&mut self.history);
+        let position = self.history_position;
+        let next_revision = self.next_revision;
+        let (sender, commands) = mpsc::sync_channel::<Command>(1);
+        let (results, receiver) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        std::thread::spawn(move || {
+            let mut document = source.open().map(|mut document| {
+                document.history = history;
+                document.history_position = position;
+                document.saved_revision = status.saved;
+                document.next_revision = next_revision;
+                document.cancellation = Some(worker_cancelled);
+                document
+            });
+            drop(source);
+            while let Ok(command) = commands.recv() {
+                let (status, source, result) = match &mut document {
+                    Ok(document) => {
+                        let result = (|| {
+                            ensure!(
+                                command.revision == document.edit_status().revision,
+                                "Document revision changed before operation"
+                            );
+                            document.check_cancelled()?;
+                            (command.change)(document)
+                        })();
+                        (
+                            document.edit_status(),
+                            result.as_ref().ok().map(|_| document.worker_source()),
+                            result,
+                        )
+                    }
+                    Err(error) => (status, None, Err(anyhow::anyhow!("{error:#}"))),
+                };
+                if results
+                    .send(Completion {
+                        operation: command.operation,
+                        status,
+                        source,
+                        result: result.map_err(|error| format!("{error:#}")),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                ctx.request_repaint();
+            }
+        });
+        self.background = Some(Background {
+            sender,
+            receiver,
+            pending: None,
+            status,
+            cancelled,
+        });
+    }
+
+    pub fn pending_operation(&self) -> Option<Operation> {
+        self.background.as_ref().and_then(|worker| worker.pending)
+    }
+
+    pub fn cancel_operation(&self) {
+        if let Some(worker) = &self.background {
+            worker.cancelled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn check_cancelled(&self) -> Result<()> {
+        ensure!(
+            !self
+                .cancellation
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::Relaxed)),
+            "Document operation cancelled"
+        );
+        Ok(())
+    }
+
+    /// Publish only a completed revision. Navigation and view-only layers may
+    /// have changed while the owner was busy, and remain UI-owned.
+    pub fn poll_background(&mut self) -> Option<(Operation, Result<()>)> {
+        let worker = self.background.as_mut()?;
+        let operation = worker.pending?;
+        let completion = match worker.receiver.try_recv() {
+            Ok(completion) => completion,
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                worker.pending = None;
+                return Some((operation, Err(anyhow::anyhow!("Document worker stopped"))));
+            }
+        };
+        worker.pending = None;
+        let result = completion
+            .result
+            .map_err(anyhow::Error::msg)
+            .and_then(|()| {
+                let source = completion.source.unwrap();
+                if completion.operation == Operation::Edit {
+                    let mut source = source;
+                    source.layers = self.layer_settings.clone();
+                    let reopened = source.open()?;
+                    self.document = reopened.document;
+                    self.bytes = reopened.bytes;
+                    self.native_text.get_mut().unwrap().clear();
+                } else {
+                    self.path = source.path;
+                }
+                self.background.as_mut().unwrap().status = completion.status;
+                Ok(())
+            });
+        Some((operation, result))
     }
 
     pub fn permissions(&self) -> PdfPermissions {
@@ -206,23 +411,38 @@ impl PdfDocument {
     }
 
     pub fn is_dirty(&self) -> bool {
+        if let Some(worker) = &self.background {
+            return worker.pending.is_some() || worker.status.revision != worker.status.saved;
+        }
         self.history[self.history_position].revision != self.saved_revision
     }
 
     pub fn can_undo(&self) -> bool {
+        if let Some(worker) = &self.background {
+            return worker.pending.is_none() && worker.status.undo;
+        }
         self.history_position > 0
     }
 
     pub fn can_redo(&self) -> bool {
+        if let Some(worker) = &self.background {
+            return worker.pending.is_none() && worker.status.redo;
+        }
         self.history_position + 1 < self.history.len()
     }
 
     pub fn undo(&mut self) -> Result<()> {
+        if let Some(worker) = &mut self.background {
+            return worker.submit(Operation::Edit, Box::new(Self::undo));
+        }
         ensure!(self.can_undo(), "Nothing to undo");
         self.restore(self.history_position - 1)
     }
 
     pub fn redo(&mut self) -> Result<()> {
+        if let Some(worker) = &mut self.background {
+            return worker.submit(Operation::Edit, Box::new(Self::redo));
+        }
         ensure!(self.can_redo(), "Nothing to redo");
         self.restore(self.history_position + 1)
     }
@@ -246,6 +466,7 @@ impl PdfDocument {
             restored.apply_layer_visibility(&self.layer_settings)?;
         }
         let inverse = crate::history::Patch::between(&bytes, &self.bytes);
+        self.check_cancelled()?;
         self.document = restored.document;
         self.bytes = bytes;
         self.history[edge].transition = Some(inverse);
@@ -258,8 +479,14 @@ impl PdfDocument {
     /// Snapshot failure leaves the live source and its undo history untouched.
     pub(crate) fn edit(
         &mut self,
-        change: impl FnOnce(&mut mupdf::pdf::PdfDocument) -> Result<()>,
+        change: impl FnOnce(&mut mupdf::pdf::PdfDocument) -> Result<()> + Send + 'static,
     ) -> Result<()> {
+        if let Some(worker) = &mut self.background {
+            return worker.submit(
+                Operation::Edit,
+                Box::new(move |document| document.edit(change)),
+            );
+        }
         // Do not use the render worker's open path: inspection layer settings
         // are view-only and must never become part of an edited/saved source.
         let mut candidate = Self::from_bytes(
@@ -286,6 +513,7 @@ impl PdfDocument {
             reopened.apply_layer_visibility(&self.layer_settings)?;
         }
         let transition = crate::history::Patch::between(&bytes, &self.bytes);
+        self.check_cancelled()?;
         self.document = reopened.document;
         self.bytes = bytes;
         self.history.truncate(self.history_position + 1);
@@ -318,6 +546,13 @@ impl PdfDocument {
 
     pub fn save(&mut self, destination: &Path) -> Result<()> {
         use std::io::Write;
+        if let Some(worker) = &mut self.background {
+            let destination = destination.to_path_buf();
+            return worker.submit(
+                Operation::Save,
+                Box::new(move |document| document.save(&destination)),
+            );
+        }
         let source = self.worker_source();
         let parent = destination
             .parent()
@@ -351,6 +586,7 @@ impl PdfDocument {
                 .as_file()
                 .set_permissions(metadata.permissions())?;
         }
+        self.check_cancelled()?;
         temporary
             .persist(destination)
             .context("Could not replace the destination PDF")?;
@@ -1009,6 +1245,147 @@ pub(crate) mod tests {
             .unwrap();
             assert!(secret.upgrade().is_none());
         }
+    }
+
+    pub fn finish_operation(document: &mut PdfDocument) -> anyhow::Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some((_, result)) = document.poll_background() {
+                return result;
+            }
+            assert!(std::time::Instant::now() < deadline, "operation timed out");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn background_transactions_preserve_snapshots_redo_encryption_and_saved_identity() {
+        use crate::annotations::{Geometry, Kind};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("encrypted.pdf");
+        let saved = directory.path().join("saved.pdf");
+        encrypted_fixture(
+            &path,
+            "open-secret",
+            Permission::ANNOTATE,
+            Encryption::Aes256,
+        );
+        let mut document = PdfDocument::open_with_password(&path, Some("open-secret"))
+            .unwrap()
+            .unwrap();
+        let permissions = document.permissions();
+        let original = document.worker_source();
+        document.start_background(egui::Context::default());
+        std::fs::remove_file(&path).unwrap();
+        document
+            .add_annotation(
+                0,
+                Kind::Note,
+                Geometry::Note([0.3, 0.7]),
+                "first",
+                [1.0, 0.2, 0.0],
+                2.0,
+            )
+            .unwrap();
+        assert!(document.annotations(0).unwrap().is_empty());
+        assert!(document.undo().is_err()); // no second admitted mutation
+        finish_operation(&mut document).unwrap();
+        assert_eq!(document.annotations(0).unwrap()[0].contents, "first");
+        assert!(original.open().unwrap().annotations(0).unwrap().is_empty());
+        document.save(&saved).unwrap();
+        assert_eq!(document.path(), path); // identity changes only on completion
+        finish_operation(&mut document).unwrap();
+        assert_eq!(document.path(), saved);
+        assert!(!document.is_dirty());
+        document.undo().unwrap();
+        finish_operation(&mut document).unwrap();
+        assert!(document.is_dirty());
+        document.delete_annotation(0, i32::MAX).unwrap();
+        assert!(finish_operation(&mut document).is_err());
+        assert!(document.can_redo());
+        document.redo().unwrap();
+        finish_operation(&mut document).unwrap();
+        assert!(!document.is_dirty());
+        document.undo().unwrap();
+        finish_operation(&mut document).unwrap();
+        document
+            .add_annotation(
+                0,
+                Kind::Note,
+                Geometry::Note([0.6, 0.2]),
+                "branch",
+                [0.0, 0.2, 1.0],
+                1.0,
+            )
+            .unwrap();
+        finish_operation(&mut document).unwrap();
+        assert!(document.is_dirty()); // a new branch is not the saved revision
+        assert!(!document.can_redo());
+        let persisted = PdfDocument::open_with_password(&saved, Some("open-secret"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.permissions(), permissions);
+        assert_eq!(persisted.annotations(0).unwrap()[0].contents, "first");
+        assert_eq!(document.annotations(0).unwrap()[0].contents, "branch");
+        document.save(directory.path()).unwrap();
+        assert!(finish_operation(&mut document).is_err());
+        assert_eq!(document.path(), saved);
+        assert!(document.is_dirty());
+    }
+
+    #[test]
+    fn cancelled_background_edit_keeps_history_and_does_not_block_navigation_or_drop() {
+        let mut document = sample_document();
+        document.start_background(egui::Context::default());
+        let (started, entered) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let ui_thread = std::thread::current().id();
+        document
+            .edit(move |pdf| {
+                assert_ne!(std::thread::current().id(), ui_thread);
+                started.send(()).unwrap();
+                resume.recv().unwrap();
+                pdf.find_page(0)?.dict_put("Rotate", pdf.new_int(90)?)?;
+                Ok(())
+            })
+            .unwrap();
+        entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(document.go_to_page(1));
+        assert!(document.is_dirty());
+        assert!(
+            document
+                .save(std::path::Path::new("not-admitted.pdf"))
+                .is_err()
+        );
+        document.cancel_operation();
+        release.send(()).unwrap();
+        assert!(
+            finish_operation(&mut document)
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+        assert_eq!(document.current_page(), 1);
+        assert_eq!(document.page_size(0).unwrap(), (300.0, 400.0));
+        assert!(!document.is_dirty());
+        assert!(!document.can_undo());
+
+        let (started, entered) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        document
+            .edit(move |_| {
+                started.send(()).unwrap();
+                resume.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+        entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        drop(document); // must not wait for resume or join the worker
+        release.send(()).unwrap();
     }
 
     #[test]
