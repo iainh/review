@@ -202,6 +202,7 @@ impl Tabs {
         root: &mut egui::Ui,
         enabled: bool,
         viewer: Option<&Viewer>,
+        hide_single_tab: bool,
     ) -> Option<Action> {
         let has_viewer = viewer.is_some();
         let mut action = None;
@@ -227,9 +228,8 @@ impl Tabs {
                 }
             });
         }
-        // The client titlebar carries the app brand; keep document identity
-        // and its close action visible even with a single tab.
-        if !self.entries.is_empty() {
+        // Hiding the strip must not disable keyboard close or tab switching.
+        if self.len() > 1 || (self.len() == 1 && !hide_single_tab) {
             let reveal = std::mem::take(&mut self.reveal_active);
             let frame = egui::Frame::new().fill(root.visuals().window_fill);
             egui::Panel::top("document_tabs")
@@ -406,6 +406,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hiding_a_single_tab_preserves_keyboard_close_and_multiple_tab_controls() {
+        for (count, hide, visible) in [
+            (0, true, false),
+            (1, false, true),
+            (1, true, false),
+            (2, true, true),
+        ] {
+            let mut tabs = Tabs::default();
+            tabs.restore(&Session {
+                files: (0..count)
+                    .map(|index| SessionFile {
+                        path: Path::new("/documents").join(format!("{index}.pdf")),
+                        reading: Default::default(),
+                        sidebar: Default::default(),
+                    })
+                    .collect(),
+                active: 0,
+            });
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let mut action = None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::W,
+                        modifiers: egui::Modifiers::COMMAND,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                    }],
+                    ..Default::default()
+                },
+                |ui| action = tabs.ui(ui, true, None, hide),
+            );
+            let tree = output.platform_output.accesskit_update.unwrap();
+            assert_eq!(
+                tree.nodes
+                    .iter()
+                    .any(|(_, node)| node.label() == Some("Close 0.pdf (not opened)")),
+                visible,
+                "count={count}, hide={hide}"
+            );
+            assert_eq!(matches!(action, Some(Action::Close(0))), count > 0);
+        }
+    }
+
+    #[test]
     fn tabs_keep_full_accessible_names_and_independent_selection_and_close_targets() {
         let mut tabs = Tabs::default();
         let long_name = "Quarterly financial report with supporting schedules and notes.pdf";
@@ -432,7 +479,7 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ui| action = tabs.ui(ui, enabled, None),
+                |ui| action = tabs.ui(ui, enabled, None, false),
             );
             (action, output)
         };
@@ -530,7 +577,7 @@ mod tests {
                     }],
                     ..Default::default()
                 },
-                |ui| action = tabs.ui(ui, enabled, None),
+                |ui| action = tabs.ui(ui, enabled, None, false),
             );
             action
         };

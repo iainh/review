@@ -32,6 +32,7 @@ cc -Wall -Wextra -Werror -I"$scratch" tests/wayland-pointer.c "$scratch/virtual-
 binary=$(realpath target/debug/review)
 chooser=$(realpath tests/gtk-chooser.py)
 state="$scratch/state/review/state.json"
+settings="$scratch/config/review/settings.json"
 title() { swaymsg -t get_tree | jq -r '.. | objects | select(.app_id? == "review") | .name'; }
 expect_title() {
     for _ in {1..100}; do
@@ -41,16 +42,17 @@ expect_title() {
     echo "Expected $1; got $(title)" >&2; exit 1
 }
 expect_state() {
+    local path=${2:-$state}
     for _ in {1..50}; do
-        if [[ -f $state ]] && jq -e "$1" "$state" >/dev/null; then return; fi
+        if [[ -f $path ]] && jq -e "$1" "$path" >/dev/null; then return; fi
         sleep .1
     done
-    echo "Failed state assertion: $1" >&2; cat "$state" >&2; exit 1
+    echo "Failed assertion in $path: $1" >&2; cat "$path" >&2; exit 1
 }
 launch() {
     local argument=""
     if [[ -n ${1:-} ]]; then argument="'$scratch/$1'"; fi
-    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland '$binary' $argument" >/dev/null
+    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' XDG_CONFIG_HOME='$scratch/config' WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland '$binary' $argument" >/dev/null
 }
 key() { wtype -s 150 -k "$1" -s 150; }
 command() { wtype -s 150 -M ctrl -k "$1" -m ctrl -s 150; }
@@ -117,7 +119,8 @@ key Down
 key Down
 key Down
 key Return
-expect_state '.restore_session and (.session.files | length) == 2 and .session.active == 1'
+expect_state '.restore_session' "$settings"
+expect_state '(.session.files | length) == 2 and .session.active == 1'
 "$scratch/pointer" click 800 450
 quit
 launch
@@ -170,7 +173,9 @@ quit
 
 # A hand-authored over-limit session must be bounded before opening documents.
 for index in {0..17}; do cp "$scratch/outline.pdf" "$scratch/tab$index.pdf"; done
-jq --arg root "$scratch" '.restore_session = true | .session = {
+jq '.restore_session = true' "$settings" > "$settings.new"
+mv "$settings.new" "$settings"
+jq --arg root "$scratch" '.session = {
     files: [range(0;18) | {path: ($root + "/tab" + tostring + ".pdf"),
         reading: {page:0,scroll:[0,0],zoom:"FitPage"},
         sidebar: {open:false,width:240,pages:false}}], active:17}' "$state" > "$state.new"

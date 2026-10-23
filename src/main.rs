@@ -345,6 +345,12 @@ impl App {
             .or_else(|| self.store.state.reading(viewer.state_key()))
         {
             viewer.restore_reading(reading);
+        } else {
+            viewer.restore_reading(&persistence::ReadingState {
+                zoom: self.store.state.default_zoom,
+                layout: self.store.state.default_layout,
+                ..Default::default()
+            });
         }
         self.store
             .state
@@ -532,7 +538,9 @@ impl App {
     fn save_state(&mut self, force: bool) {
         self.capture_state();
         if let Err(error) = self.store.save(force) {
-            self.state_error = Some(format!("Could not save reading state: {error:#}"));
+            self.state_error = Some(format!(
+                "Could not save settings or reading state: {error:#}"
+            ));
         }
     }
 }
@@ -693,9 +701,36 @@ impl ApplicationHandler<AppEvent> for App {
                     let events =
                         unsaved_active.then(|| ctx.input_mut(|i| std::mem::take(&mut i.events)));
                     ui.add_enabled_ui(!unsaved_active, |ui| {
+                        if !unsaved_active
+                            && self.password_prompt.is_none()
+                            && !self.native_ui.help_open
+                            && !self.native_ui.settings_open
+                            && !self.viewer.as_ref().is_some_and(Viewer::modal_open)
+                            && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma))
+                        {
+                            self.native_ui.open_settings(&ctx);
+                        }
+                        let settings_active = self.native_ui.settings_open;
+                        let restore_session = self.store.state.restore_session;
+                        let settings_path = self.store.settings_path().map(ToOwned::to_owned);
+                        if !unsaved_active
+                            && self.native_ui.settings(
+                                &ctx,
+                                &mut self.store.state,
+                                settings_path.as_deref(),
+                            )
+                        {
+                            if restore_session != self.store.state.restore_session {
+                                self.session_cleared = false;
+                            }
+                            force_save = true;
+                        }
+                        let settings_events = settings_active
+                            .then(|| ctx.input_mut(|i| std::mem::take(&mut i.events)));
                         let library_enabled = !unsaved_active
                             && self.password_prompt.is_none()
                             && !self.native_ui.help_open
+                            && !settings_active
                             && !self.viewer.as_ref().is_some_and(Viewer::modal_open)
                             && !ui.input(|input| input.key_pressed(Key::F1));
                         self.desktop
@@ -731,6 +766,7 @@ impl ApplicationHandler<AppEvent> for App {
                                 ui,
                                 library_enabled && !menu_active,
                                 self.viewer.as_ref(),
+                                self.store.state.hide_single_tab,
                             );
                             if self.library.ui(
                                 ui,
@@ -753,19 +789,21 @@ impl ApplicationHandler<AppEvent> for App {
                             });
                             if let Some(error) = &self.state_error {
                                 let mut dismiss = false;
-                                egui::Window::new("Reading state").collapsible(false).show(
-                                    ui.ctx(),
-                                    |ui| {
+                                egui::Window::new("Settings and reading state")
+                                    .collapsible(false)
+                                    .show(ui.ctx(), |ui| {
                                         ui.label(error);
                                         dismiss = ui.button("Close").clicked();
-                                    },
-                                );
+                                    });
                                 if dismiss {
                                     self.state_error = None;
                                 }
                             }
                         });
                         if let Some(events) = menu_events {
+                            ctx.input_mut(|i| i.events = events);
+                        }
+                        if let Some(events) = settings_events {
                             ctx.input_mut(|i| i.events = events);
                         }
                     });
@@ -833,6 +871,9 @@ impl ApplicationHandler<AppEvent> for App {
                             ));
                     }
                     Some(desktop::Action::Help) => self.native_ui.open_help(&renderer.context),
+                    Some(desktop::Action::Settings) => {
+                        self.native_ui.open_settings(&renderer.context)
+                    }
                     None => {}
                 }
                 #[cfg(target_os = "macos")]
@@ -2068,6 +2109,58 @@ mod tests {
         for args in [&["a.pdf", "b.pdf"][..], &["--"], &["--unknown"]] {
             assert!(parse(args).is_err());
         }
+    }
+
+    #[test]
+    fn default_view_applies_only_without_a_saved_reading_position() {
+        use layout::LayoutMode;
+        use persistence::{ReadingState, Store};
+        use zoom::Zoom;
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.pdf");
+        let second = directory.path().join("second.pdf");
+        for path in [&first, &second] {
+            std::fs::write(path, document::tests::sample_pdf("", false)).unwrap();
+        }
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        app.store.state.default_zoom = Zoom::Percent(1.75);
+        app.store.state.default_layout = LayoutMode::Facing;
+        app.open(first.clone());
+        app.wait_for_load();
+        assert_eq!(
+            app.viewer.as_ref().unwrap().reading_state(),
+            ReadingState {
+                zoom: Zoom::Percent(1.75),
+                layout: LayoutMode::Facing,
+                ..Default::default()
+            }
+        );
+        let saved = ReadingState {
+            page: 1,
+            zoom: Zoom::Percent(2.25),
+            layout: LayoutMode::Continuous,
+            ..Default::default()
+        };
+        app.viewer.as_mut().unwrap().restore_reading(&saved);
+        app.save_state(true);
+        drop(app);
+        let mut app = App::with_state(Store::temporary(directory.path()), None);
+        app.open(first);
+        app.wait_for_load();
+        assert_eq!(app.viewer.as_ref().unwrap().reading_state(), saved);
+        app.store.state.default_zoom = Zoom::FitWidth;
+        app.store.state.default_layout = LayoutMode::Single;
+        assert_eq!(app.viewer.as_ref().unwrap().reading_state(), saved);
+        app.open(second);
+        app.wait_for_load();
+        assert_eq!(
+            app.viewer.as_ref().unwrap().reading_state(),
+            ReadingState {
+                zoom: Zoom::FitWidth,
+                layout: LayoutMode::Single,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

@@ -102,6 +102,7 @@ binary = str(Path(sys.argv[1]).resolve())
 fixtures = Path(sys.argv[2]).resolve()
 environment = {k: v for k, v in os.environ.items() if k != "DISPLAY"}
 environment["XDG_STATE_HOME"] = str(fixtures / "state")
+environment["XDG_CONFIG_HOME"] = str(fixtures / "config")
 with subprocess.Popen(["wtype", "-s", "120000"]) as keyboard:
     try:
         for filename in ["forms", "forms-only", "forms-denied"]:

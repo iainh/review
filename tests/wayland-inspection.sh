@@ -20,7 +20,7 @@ original=$(sha256sum "$scratch/inspection.pdf" | cut -d' ' -f1)
 
 launch() {
     rm -f "$scratch/viewer-exit"
-    swaymsg "exec bash -c 'env -u DISPLAY XDG_STATE_HOME=\"$scratch/state\" WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland \"$binary\" \"$scratch/$1.pdf\"; printf \"%s\\n\" \$? > \"$scratch/viewer-exit\"'" >/dev/null
+    swaymsg "exec bash -c 'env -u DISPLAY XDG_STATE_HOME=\"$scratch/state\" XDG_CONFIG_HOME=\"$scratch/config\" WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland \"$binary\" \"$scratch/$1.pdf\"; printf \"%s\\n\" \$? > \"$scratch/viewer-exit\"'" >/dev/null
 }
 close_viewer() {
     swaymsg '[app_id="^review$"] kill' >/dev/null

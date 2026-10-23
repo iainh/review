@@ -131,7 +131,8 @@ def open_pdf(name):
         process.wait(timeout=10)
     process = subprocess.Popen([binary, f"{fixtures}/{name}.pdf"],
                                env={**{k: v for k, v in os.environ.items() if k != "DISPLAY"},
-                                    "XDG_STATE_HOME": state_home})
+                                    "XDG_STATE_HOME": state_home,
+                                    "XDG_CONFIG_HOME": str(Path(state_home) / "config")})
     find("Reading options", "push button")
     assert window()["shell"] == "xdg_shell"
     time.sleep(.8)

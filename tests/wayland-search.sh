@@ -32,7 +32,7 @@ open_pdf() {
     if [[ -n $(title) ]]; then swaymsg '[app_id="^review$"] kill' >/dev/null; fi
     for _ in {1..100}; do [[ -z $(title) ]] && break; sleep .1; done
     [[ -z $(title) ]]
-    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$1.pdf'" >/dev/null
+    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' XDG_CONFIG_HOME='$scratch/config' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$1.pdf'" >/dev/null
     expect_page 1 "$2"
     swaymsg '[app_id="^review$"] focus' >/dev/null
     sleep .7

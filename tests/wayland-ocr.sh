@@ -52,7 +52,7 @@ open_pdf() {
     rm -f "$scratch/engine.pid" "$scratch/engine.directory" "$scratch/engine.mode"
     local path=${2:-$scratch/normal:$PATH}
     launch=$((launch + 1))
-    swaymsg "exec /usr/bin/env -u DISPLAY XDG_STATE_HOME='$scratch/state-$launch' WINIT_UNIX_BACKEND=wayland PATH='$path' TMPDIR='$scratch/private' '$binary' '$scratch/$1.pdf'" >/dev/null
+    swaymsg "exec /usr/bin/env -u DISPLAY XDG_STATE_HOME='$scratch/state-$launch' XDG_CONFIG_HOME='$scratch/config-$launch' WINIT_UNIX_BACKEND=wayland PATH='$path' TMPDIR='$scratch/private' '$binary' '$scratch/$1.pdf'" >/dev/null
     for _ in {1..100}; do
         [[ $(title) == "Review — $1.pdf — 1/2 — Fit page" ]] && break
         sleep .1

@@ -43,8 +43,9 @@ full permissions; PDFs with an empty user password open without prompting.
 
 `review --help` prints usage without opening a window. Use `review -- -draft.pdf`
 for a filename that starts with a dash. Review supports up to 16 open documents.
-The tab strip appears when multiple documents are open. Click a tab to select
-it, or use **Ctrl+Tab**/**Ctrl+Shift+Tab** to cycle in either direction. **×** or
+The tab strip appears whenever a document is open, unless you enable the
+preference to hide it for a single document. Click a tab to select it, or use
+**Ctrl+Tab**/**Ctrl+Shift+Tab** to cycle in either direction. **×** or
 **Ctrl+W** (**Cmd+W** on macOS) closes the current document; closing the last tab
 leaves an empty window. **Ctrl+Q** (**Cmd+Q** on macOS) closes the window.
 
@@ -275,8 +276,11 @@ keep their own font, and PDF page fonts are unchanged.
 The desktop titlebar provides native window controls, dragging and edge resizing.
 On macOS, **File**, **Recent**, **Bookmarks**, **View** and **Help** are in the
 system menu bar; on Linux and Windows they are in the titlebar. Document tabs
-sit below it, including when only one PDF is open. Menu actions use the same
-Open, Save, Print and protected Close/Quit paths as the document controls. Unavailable actions
+sit below it. Enable **Settings → Hide tabs for a single document**
+to hide the strip for a single PDF; multiple documents always show tabs.
+**Ctrl+W** (**Cmd+W** on macOS) still closes the document when tabs are hidden.
+Menu actions use the same Open, Save, Print and protected Close/Quit paths as
+the document controls. Unavailable actions
 are disabled. On Linux and Windows, menus adapt to narrow windows;
 **Ctrl+F2**, arrows and **Enter**/**Space** navigate them, and **Escape**
 dismisses them.
@@ -288,7 +292,21 @@ focused controls. **F1** or **Help → Keyboard shortcuts** opens keyboard help,
 focuses its close button and restores previous focus on dismissal. Ctrl/Cmd
 zoom shortcuts work while a field has focus.
 
-**View → Appearance** offers **System**, **Light**, **Dark** and **High contrast**.
+Open **File → Settings…** (**Review → Settings…** on macOS), or press
+**Ctrl+,** (**Cmd+,** on macOS), to change appearance, tab visibility, default
+view and startup behaviour.
+Changes apply and save immediately; **Escape** or **Done** dismisses the
+dialog. Expand **Settings file location** to view or select its path.
+
+**New document view** sets the initial zoom (**Fit page**, **Fit width** or
+**Custom**, with a percentage from 10 to 1600%) and page layout (**Single page**,
+**Continuous** or **Facing pages**) for documents without a saved reading
+position. Defaults start at Fit page and Single page. Changing them does not
+alter open documents or override saved reading positions, restored tabs or
+personal bookmarks.
+
+Settings offers **System**, **Light**, **Dark** and **High contrast** appearance.
+These choices are also available under **View → Appearance**.
 System follows the light/dark theme reported by the OS, falling back to egui's
 dark theme when unavailable. High contrast is an explicit black-and-white UI
 with yellow focus/selection borders; winit does not report OS high-contrast mode.
@@ -364,8 +382,9 @@ between sessions. Window placement is restored only where the window system
 allows it; Wayland leaves placement to the compositor. Session restoration is
 off by default.
 
-Enable **Recent files → Restore tabs on startup** to remember up to 16 document
-paths, individual reading/sidebar states, tab order and the selected tab. A
+Enable **Settings → Restore tabs on startup** (also available in **Recent**)
+to remember up to 16 document paths, individual reading/sidebar states, tab
+order and the selected tab. A
 launch without a path restores that session; an explicit path starts a new
 session. Restored documents open on selection, so missing or encrypted files
 do not prevent other tabs from opening. Encrypted documents always need fresh
@@ -398,6 +417,19 @@ uses defaults. Storage is private to the current user:
   `~/.local/state/review/state.json`.
 - macOS: `~/Library/Application Support/org.spiralpoint.Review/state.json`.
 - Windows: `%LOCALAPPDATA%\spiralpoint\Review\data\state.json`.
+
+Appearance, tab visibility, default view and startup restoration are stored
+separately in `settings.json`, using the platform's configuration directory:
+
+- Linux: `$XDG_CONFIG_HOME/review/settings.json`, defaulting to
+  `~/.config/review/settings.json`.
+- macOS: `~/Library/Application Support/org.spiralpoint.Review/settings.json`.
+- Windows: `%APPDATA%\spiralpoint\Review\config\settings.json`.
+
+Existing preferences migrate automatically from `state.json`. Settings writes
+use the same private, atomic replacement as reading state. Missing settings
+use defaults (or legacy preferences during migration); invalid settings show
+a warning without discarding reading history.
 
 ## Downloads
 

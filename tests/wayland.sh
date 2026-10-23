@@ -20,7 +20,7 @@ cc -Wall -Wextra -Werror -I"$scratch" tests/wayland-pointer.c "$scratch/virtual-
 binary=$(realpath target/debug/review)
 geometry=$(realpath tests/pdf-page-geometry.py)
 pdf=$(realpath "$pdf")
-swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$pdf'" >/dev/null
+swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' XDG_CONFIG_HOME='$scratch/config' WINIT_UNIX_BACKEND=wayland '$binary' '$pdf'" >/dev/null
 
 title() {
     swaymsg -t get_tree | jq -r '.. | objects | select(.name? | strings | startswith("Review —")) | .name'
@@ -185,7 +185,7 @@ echo 'PASS: Wayland preview navigation, scrolling, resizing, and sidebar toggle'
 # The handbook has no embedded outline. Exercise hierarchy and destinations
 # with the synthetic two-page fixture instead.
 swaymsg '[title="^Review —"] kill' >/dev/null
-swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/outline.pdf'" >/dev/null
+swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' XDG_CONFIG_HOME='$scratch/config' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/outline.pdf'" >/dev/null
 expect_page 1 2
 # Sidebar preferences now follow the reader between documents.
 # Window titles precede first-frame presentation with background rendering.

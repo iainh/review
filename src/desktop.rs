@@ -26,6 +26,7 @@ pub enum Action {
     Appearance(Appearance),
     Fullscreen,
     Help,
+    Settings,
 }
 
 pub struct Desktop {
@@ -82,7 +83,13 @@ impl Default for Desktop {
                 Action::CloseTab,
                 key(egui::Key::W, false),
             ))
-            .add_subitem(item(&tx, "Quit", Action::Quit, key(egui::Key::Q, false)));
+            .add_subitem(item(&tx, "Quit", Action::Quit, key(egui::Key::Q, false)))
+            .add_subitem(item(
+                &tx,
+                "Settings…",
+                Action::Settings,
+                key(egui::Key::Comma, false),
+            ));
         let mut appearance = SubMenuItem::new("Appearance");
         for choice in [
             Appearance::System,

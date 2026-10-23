@@ -78,6 +78,7 @@ for repetition in range(repetitions):
         shutil.copyfile(pdf, document)
         log = (output / f"run-{repetition + 1}.log").open("w")
         env = {**os.environ, "XDG_STATE_HOME": scratch + "/state",
+               "XDG_CONFIG_HOME": scratch + "/config",
                "WINIT_UNIX_BACKEND": "wayland"}
         env.pop("DISPLAY", None)
         process = subprocess.Popen([binary, document], env=env, stdout=log, stderr=log)

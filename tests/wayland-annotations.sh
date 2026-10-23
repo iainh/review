@@ -40,7 +40,7 @@ capture() {
 }
 open_pdf() {
     if [[ -n $(title) ]]; then command_key q; expect_title ''; fi
-    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$1.pdf'" >/dev/null
+    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' XDG_CONFIG_HOME='$scratch/config' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$1.pdf'" >/dev/null
     expect_title "Review — $1.pdf — 1/2 — Fit page"
     sleep 1
 }

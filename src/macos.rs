@@ -131,6 +131,17 @@ fn build_menu(
 
     let application = menu("Review", mtm);
     application.addItem(&menu_item(
+        "Settings…",
+        Some(Action::Settings),
+        Some(Shortcut::command(",")),
+        enabled(true),
+        false,
+        target,
+        &mut actions,
+        mtm,
+    ));
+    add_separator(&application, mtm);
+    application.addItem(&menu_item(
         "Quit Review",
         Some(Action::Quit),
         Some(Shortcut::command("q")),

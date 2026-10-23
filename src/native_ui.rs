@@ -181,6 +181,8 @@ pub fn studio_button(ui: &mut egui::Ui, button: egui::Button<'_>, primary: bool)
 #[derive(Default)]
 pub struct NativeUi {
     pub appearance: Appearance,
+    pub settings_open: bool,
+    settings_first_frame: bool,
     pub help_open: bool,
     help_first_frame: bool,
     restore_focus: Option<Id>,
@@ -197,7 +199,145 @@ impl NativeUi {
                 self.open_help(&ctx);
             }
         }
-        self.help_open
+        self.help_open || self.settings_open
+    }
+
+    pub fn open_settings(&mut self, ctx: &Context) {
+        self.restore_focus = ctx.memory(|memory| memory.focused());
+        self.settings_open = true;
+        self.settings_first_frame = true;
+        ctx.request_repaint();
+    }
+
+    /// Settings apply immediately; callers persist changes through the normal store.
+    pub fn settings(
+        &mut self,
+        ctx: &Context,
+        state: &mut crate::persistence::State,
+        path: Option<&std::path::Path>,
+    ) -> bool {
+        if !self.settings_open {
+            return false;
+        }
+        let before = (
+            self.appearance,
+            state.restore_session,
+            state.hide_single_tab,
+            state.default_zoom,
+            state.default_layout,
+        );
+        let viewport = ctx.content_rect();
+        let response = egui::Modal::new(Id::new("settings"))
+            .frame(egui::Frame::popup(&ctx.global_style()).inner_margin(16.0))
+            .show(ctx, |ui| {
+            ui.set_width((viewport.width() - 64.0).clamp(200.0, 440.0));
+            ui.heading("Settings");
+            ui.add_space(8.0);
+            ui.style_mut().spacing.scroll.floating = false;
+            egui::ScrollArea::vertical()
+                .id_salt("settings_content")
+                .max_height((viewport.height() - 150.0).max(100.0))
+                .show(ui, |ui| {
+                    ui.strong("Appearance");
+                    ui.horizontal_wrapped(|ui| {
+                        for choice in [Appearance::System, Appearance::Light, Appearance::Dark, Appearance::HighContrast] {
+                            ui.radio_value(&mut self.appearance, choice, choice.label());
+                        }
+                    });
+                    ui.weak("PDF page colours are unchanged.");
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.strong("Documents");
+                    ui.checkbox(&mut state.hide_single_tab, "Hide tabs for a single document");
+                    ui.checkbox(&mut state.restore_session, "Restore tabs on startup");
+                    ui.weak("Unsaved changes and passwords are not restored.");
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.strong("New document view");
+                    let control_width = (ui.available_width() - 100.0).clamp(100.0, 180.0);
+                    egui::Grid::new("default_view").spacing([16.0, 6.0]).show(ui, |ui| {
+                        let label = ui.label("Zoom");
+                        egui::ComboBox::from_id_salt("default_zoom")
+                            .width(control_width)
+                            .selected_text(match state.default_zoom {
+                                crate::zoom::Zoom::Percent(_) => "Custom".into(),
+                                zoom => zoom.label(),
+                            })
+                            .show_ui(ui, |ui| {
+                                use crate::zoom::Zoom;
+                                ui.selectable_value(&mut state.default_zoom, Zoom::FitPage, "Fit page");
+                                ui.selectable_value(&mut state.default_zoom, Zoom::FitWidth, "Fit width");
+                                let percent = match state.default_zoom { Zoom::Percent(value) => value, _ => 1.0 };
+                                ui.selectable_value(&mut state.default_zoom, Zoom::Percent(percent), "Custom");
+                            }).response.labelled_by(label.id);
+                        ui.end_row();
+                        if let crate::zoom::Zoom::Percent(value) = &mut state.default_zoom {
+                            let label = ui.label("Percentage");
+                            let mut percent = *value * 100.0;
+                            if ui.add(egui::DragValue::new(&mut percent).range(10.0..=1600.0).suffix("%"))
+                                .labelled_by(label.id)
+                                .on_hover_text("Zoom percentage, from 10% to 1600%")
+                                .changed() {
+                                *value = percent / 100.0;
+                            }
+                            ui.end_row();
+                        }
+                        let label = ui.label("Page layout");
+                        egui::ComboBox::from_id_salt("default_layout")
+                            .width(control_width)
+                            .selected_text(state.default_layout.label())
+                            .show_ui(ui, |ui| {
+                                use crate::layout::LayoutMode;
+                                for mode in [LayoutMode::Single, LayoutMode::Continuous, LayoutMode::Facing] {
+                                    ui.selectable_value(&mut state.default_layout, mode, mode.label());
+                                }
+                            }).response.labelled_by(label.id);
+                        ui.end_row();
+                    });
+                    ui.weak("Saved reading positions take precedence. Open documents are unchanged.");
+                    ui.add_space(12.0);
+                    ui.separator();
+                    egui::CollapsingHeader::new("Settings file location")
+                        .id_salt("settings_file_location")
+                        .show(ui, |ui| {
+                            if let Some(path) = path {
+                                ui.add(egui::Label::new(path.to_string_lossy()).wrap().selectable(true));
+                            } else {
+                                ui.weak("User configuration directory is unavailable.");
+                            }
+                        });
+                });
+            ui.add_space(8.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.weak("Changes apply immediately");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let close = ui.button("Done").on_hover_text("Close settings (Esc)");
+                    if self.settings_first_frame {
+                        close.request_focus();
+                    }
+                    close.clicked()
+                }).inner
+            }).inner
+        });
+        self.settings_first_frame = false;
+        if response.inner || response.should_close() {
+            self.settings_open = false;
+            ctx.request_repaint();
+        }
+        if self.appearance != before.0 {
+            self.appearance.apply(ctx);
+        }
+        before
+            != (
+                self.appearance,
+                state.restore_session,
+                state.hide_single_tab,
+                state.default_zoom,
+                state.default_layout,
+            )
     }
 
     pub fn open_help(&mut self, ctx: &Context) {
@@ -212,13 +352,16 @@ impl NativeUi {
     }
 
     pub fn finish(&mut self, ctx: &Context) {
-        if !self.help_open {
+        if !self.help_open && !self.settings_open {
             // Restore after underlying controls were drawn: the previous
             // frame's modal layer still rejects their focus during drawing.
             if let Some(id) = self.restore_focus.take() {
                 ctx.memory_mut(|memory| memory.request_focus(id));
                 ctx.request_repaint();
             }
+            return;
+        }
+        if !self.help_open {
             return;
         }
         let primary = if cfg!(target_os = "macos") {
@@ -240,6 +383,7 @@ impl NativeUi {
                 .show(ui, |ui| {
                 for (keys, action) in [
                     (format!("{primary}+O"), "Open PDF"),
+                    (format!("{primary}+,"), "Open settings"),
                     (format!("{primary}+S / {primary}+Shift+S"), "Save / Save As"),
                     (format!("{primary}+Z / {primary}+Shift+Z"), "Undo / redo document edit (outside text fields)"),
                     (format!("{primary}+P"), "Print PDF"),

@@ -119,12 +119,20 @@ pub struct Session {
 #[serde(default)]
 pub struct State {
     version: u32,
+    #[serde(skip_serializing)]
     pub appearance: crate::native_ui::Appearance,
     pub sidebar: SidebarState,
     pub window: WindowState,
     pub recent: Vec<RecentFile>,
     pub bookmarks: Vec<Bookmark>,
+    #[serde(skip_serializing)]
     pub restore_session: bool,
+    #[serde(skip)]
+    pub hide_single_tab: bool,
+    #[serde(skip)]
+    pub default_zoom: Zoom,
+    #[serde(skip)]
+    pub default_layout: LayoutMode,
     pub session: Session,
 }
 
@@ -138,6 +146,9 @@ impl Default for State {
             recent: Vec::new(),
             bookmarks: Vec::new(),
             restore_session: false,
+            hide_single_tab: false,
+            default_zoom: Zoom::default(),
+            default_layout: LayoutMode::default(),
             session: Session::default(),
         }
     }
@@ -145,9 +156,6 @@ impl Default for State {
 
 impl State {
     fn sanitize(&mut self) {
-        if !self.restore_session {
-            self.session = Session::default();
-        }
         self.session.files.truncate(MAX_SESSION);
         let active_path = self
             .session
@@ -287,24 +295,58 @@ mod native_path {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct Settings {
+    appearance: crate::native_ui::Appearance,
+    restore_session: bool,
+    hide_single_tab: bool,
+    default_zoom: Zoom,
+    default_layout: LayoutMode,
+}
+
+impl Settings {
+    fn from_state(state: &State) -> Self {
+        Self {
+            appearance: state.appearance,
+            restore_session: state.restore_session,
+            hide_single_tab: state.hide_single_tab,
+            default_zoom: state.default_zoom,
+            default_layout: state.default_layout,
+        }
+    }
+}
+
 pub struct Store {
     pub state: State,
     path: Option<PathBuf>,
+    settings_path: Option<PathBuf>,
+    saved_settings: Option<Settings>,
     saved: State,
     next_write: Instant,
 }
 
 impl Store {
     pub fn load() -> (Self, Option<String>) {
-        let path = ProjectDirs::from("org", "spiralpoint", "Review").map(|dirs| {
+        let dirs = ProjectDirs::from("org", "spiralpoint", "Review");
+        let path = dirs.as_ref().map(|dirs| {
             dirs.state_dir()
                 .unwrap_or(dirs.data_local_dir())
                 .join("state.json")
         });
-        Self::load_from(path)
+        let settings_path = dirs.map(|dirs| dirs.config_dir().join("settings.json"));
+        Self::load_paths(path, settings_path)
     }
 
+    #[cfg(test)]
     fn load_from(path: Option<PathBuf>) -> (Self, Option<String>) {
+        let settings_path = path
+            .as_ref()
+            .map(|path| path.with_file_name("settings.json"));
+        Self::load_paths(path, settings_path)
+    }
+
+    fn load_paths(path: Option<PathBuf>, settings_path: Option<PathBuf>) -> (Self, Option<String>) {
         let loaded = (|| -> Result<State> {
             let path = path
                 .as_ref()
@@ -333,7 +375,7 @@ impl Store {
             state.sanitize();
             Ok(state)
         })();
-        let (state, error) = match loaded {
+        let (mut state, mut error) = match loaded {
             Ok(state) => (state, None),
             Err(error) => (
                 State::default(),
@@ -342,11 +384,59 @@ impl Store {
                 )),
             ),
         };
+        let settings = (|| -> Result<Option<Settings>> {
+            let path = settings_path
+                .as_ref()
+                .context("User configuration directory is unavailable")?;
+            let mut file = match File::open(path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            let mut bytes = Vec::new();
+            Read::by_ref(&mut file)
+                .take(MAX_STATE_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+            ensure!(
+                bytes.len() as u64 <= MAX_STATE_BYTES,
+                "Settings file is too large"
+            );
+            let mut settings: Settings = serde_json::from_slice(&bytes)?;
+            if let Zoom::Percent(value) = settings.default_zoom
+                && (!value.is_finite() || !(0.1..=16.0).contains(&value))
+            {
+                settings.default_zoom = Zoom::default();
+            }
+            Ok(Some(settings))
+        })();
+        let saved_settings = match settings {
+            Ok(Some(settings)) => {
+                state.appearance = settings.appearance;
+                state.restore_session = settings.restore_session;
+                state.hide_single_tab = settings.hide_single_tab;
+                state.default_zoom = settings.default_zoom;
+                state.default_layout = settings.default_layout;
+                Some(settings)
+            }
+            Ok(None) => None, // Migrate legacy preferences on the next save.
+            Err(settings_error) => {
+                state.appearance = Default::default();
+                state.restore_session = false;
+                let warning = format!("Could not load settings; using defaults. {settings_error}");
+                error = Some(error.map_or(warning.clone(), |error| format!("{error}\n{warning}")));
+                Some(Settings::from_state(&state))
+            }
+        };
+        if !state.restore_session {
+            state.session = Session::default();
+        }
         (
             Self {
                 saved: state.clone(),
                 state,
                 path,
+                settings_path,
+                saved_settings,
                 next_write: Instant::now(),
             },
             error,
@@ -354,18 +444,42 @@ impl Store {
     }
 
     pub fn save_deadline(&self) -> Option<Instant> {
-        (self.state != self.saved).then_some(self.next_write)
+        (self.state != self.saved
+            || self.saved_settings.as_ref() != Some(&Settings::from_state(&self.state)))
+        .then_some(self.next_write)
+    }
+
+    pub fn settings_path(&self) -> Option<&Path> {
+        self.settings_path.as_deref()
     }
 
     pub fn save(&mut self, force: bool) -> Result<()> {
-        if self.state == self.saved || (!force && Instant::now() < self.next_write) {
+        if self.save_deadline().is_none() || (!force && Instant::now() < self.next_write) {
             return Ok(());
         }
         self.next_write = Instant::now() + SAVE_INTERVAL;
+        let settings = Settings::from_state(&self.state);
+        if self.saved_settings.as_ref() != Some(&settings) {
+            let path = self
+                .settings_path
+                .as_ref()
+                .context("User configuration directory is unavailable")?;
+            Self::write(path, &settings)?;
+            self.saved_settings = Some(settings);
+        }
+        if self.state == self.saved {
+            return Ok(());
+        }
         let path = self
             .path
             .as_ref()
             .context("User state directory is unavailable")?;
+        Self::write(path, &self.state)?;
+        self.saved = self.state.clone();
+        Ok(())
+    }
+
+    fn write(path: &Path, value: &impl Serialize) -> Result<()> {
         let directory = path.parent().context("Invalid reading-state path")?;
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
@@ -377,7 +491,7 @@ impl Store {
         builder.create(directory)?;
         // Same-directory tempfile + atomic replacement, including on Windows.
         // tempfile uses private permissions on Unix and removes failed writes.
-        let bytes = serde_json::to_vec_pretty(&self.state)?;
+        let bytes = serde_json::to_vec_pretty(value)?;
         ensure!(
             (bytes.len() as u64) < MAX_STATE_BYTES,
             "Reading state is too large"
@@ -391,7 +505,6 @@ impl Store {
             .context("Could not replace reading state")?;
         #[cfg(unix)]
         File::open(directory)?.sync_all()?;
-        self.saved = self.state.clone();
         Ok(())
     }
 
@@ -404,6 +517,99 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_migrate_to_config_and_override_legacy_preferences_without_losing_session() {
+        use crate::native_ui::Appearance;
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("state/state.json");
+        let settings_path = directory.path().join("config/settings.json");
+        fs::create_dir(state_path.parent().unwrap()).unwrap();
+        let document = directory.path().join("paper.pdf");
+        let legacy = serde_json::json!({
+            "appearance": "Light", "restore_session": true,
+            "session": {"files": [{"path": document, "reading": {"page": 7}}], "active": 0}
+        });
+        fs::write(&state_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let load = || Store::load_paths(Some(state_path.clone()), Some(settings_path.clone()));
+        let (mut store, error) = load();
+        assert!(error.is_none());
+        assert_eq!(store.state.appearance, Appearance::Light);
+        assert_eq!(store.state.session.files[0].reading.page, 7);
+        store.save(true).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            settings,
+            serde_json::json!({"appearance":"Light", "restore_session":true,
+                "hide_single_tab":false, "default_zoom":"FitPage", "default_layout":"Single"})
+        );
+        // Settings, not stale legacy fields, are authoritative on subsequent loads.
+        fs::write(
+            &settings_path,
+            br#"{"appearance":"Dark","restore_session":true}"#,
+        )
+        .unwrap();
+        let (mut store, error) = load();
+        assert!(error.is_none());
+        assert_eq!(store.state.appearance, Appearance::Dark);
+        assert_eq!(store.state.session.files[0].path, document);
+        store.state.restore_session = false;
+        store.state.session = Session::default();
+        store.save(true).unwrap();
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        assert!(state.get("appearance").is_none());
+        assert!(state.get("restore_session").is_none());
+        assert!(load().0.state.session.files.is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&settings_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(settings_path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_settings_warn_without_discarding_reading_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("paper.pdf");
+        let mut store = Store::temporary(directory.path());
+        store.state.opened(path.clone(), ReadingState::default());
+        store.save(true).unwrap();
+        let settings_path = directory.path().join("settings.json");
+        for bytes in [
+            b"invalid".to_vec(),
+            br#"{"appearance":"Unknown"}"#.to_vec(),
+            vec![b' '; MAX_STATE_BYTES as usize + 1],
+        ] {
+            fs::write(&settings_path, &bytes).unwrap();
+            let (mut restored, error) = Store::load_from(Some(directory.path().join("state.json")));
+            assert!(error.unwrap().contains("Could not load settings"));
+            assert_eq!(restored.state.recent[0].path, path);
+            assert_eq!(restored.state.appearance, Default::default());
+            assert!(!restored.state.restore_session);
+            restored.save(true).unwrap();
+            assert_eq!(fs::read(&settings_path).unwrap(), bytes);
+            restored.state.appearance = crate::native_ui::Appearance::Dark;
+            restored.save(true).unwrap();
+            assert!(
+                Store::load_from(Some(directory.path().join("state.json")))
+                    .1
+                    .is_none()
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -439,6 +645,9 @@ mod tests {
         store.state.opened(path.clone(), reading.clone());
         store.state.toggle_bookmark(path.clone(), reading.clone());
         store.state.appearance = crate::native_ui::Appearance::HighContrast;
+        store.state.hide_single_tab = true;
+        store.state.default_zoom = Zoom::Percent(1.75);
+        store.state.default_layout = LayoutMode::Facing;
         store.state.sidebar = SidebarState {
             open: false,
             width: 327.0,
@@ -467,7 +676,7 @@ mod tests {
         for forbidden in ["password", "contents", "text", "query"] {
             assert!(!json.contains(forbidden));
         }
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -587,7 +796,9 @@ mod tests {
         for index in 0..MAX_SESSION + 8 {
             state.session.files.push(file(&format!("{index}.pdf")));
         }
-        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        legacy["restore_session"] = true.into();
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let loaded = Store::temporary(directory.path());
         assert_eq!(loaded.state.session.files.len(), 14);
         assert_eq!(loaded.state.session.active, 1);

@@ -96,7 +96,8 @@ with tempfile.TemporaryDirectory() as state_directory, \
      subprocess.Popen(["wtype", "-s", "120000"]) as keyboard, \
      subprocess.Popen([str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve())],
                       env={key: value for key, value in os.environ.items() if key != "DISPLAY"}
-                      | {"XDG_STATE_HOME": state_directory}) as process:
+                      | {"XDG_STATE_HOME": state_directory,
+                         "XDG_CONFIG_HOME": str(Path(state_directory) / "config")}) as process:
     try:
         find("Zoom in", "push button")
         find("Zoom out", "push button")
@@ -173,12 +174,13 @@ with tempfile.TemporaryDirectory() as state_directory, \
         key("q", "ctrl")
         process.wait(timeout=10)
         assert process.returncode == 0, f"Review exited with status {process.returncode}"
-        state = json.loads((Path(state_directory) / "review/state.json").read_text())
-        assert state["appearance"] == "HighContrast"
+        settings = json.loads((Path(state_directory) / "config/review/settings.json").read_text())
+        assert settings["appearance"] == "HighContrast"
         time.sleep(0.3)
         with subprocess.Popen([str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve())],
                               env={key: value for key, value in os.environ.items() if key != "DISPLAY"}
-                              | {"XDG_STATE_HOME": state_directory}) as restored:
+                              | {"XDG_STATE_HOME": state_directory,
+                                 "XDG_CONFIG_HOME": str(Path(state_directory) / "config")}) as restored:
             try:
                 wait_for(lambda: page_number() == "2", "restored current page")
                 capture("appearance-restored")

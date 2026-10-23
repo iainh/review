@@ -94,9 +94,10 @@ binary = str(Path(sys.argv[1]).resolve())
 fixtures = Path(sys.argv[2]).resolve()
 captures = Path(sys.argv[3]).resolve()
 pointer = sys.argv[4]
-state_path = fixtures / "state/review/state.json"
+settings_path = fixtures / "config/review/settings.json"
 environment = {k: v for k, v in os.environ.items() if k != "DISPLAY"}
 environment["XDG_STATE_HOME"] = str(fixtures / "state")
+environment["XDG_CONFIG_HOME"] = str(fixtures / "config")
 
 
 def capture(name):
@@ -180,7 +181,7 @@ with subprocess.Popen(["wtype", "-s", "300000"]) as keyboard, \
             click("Appearance")
             capture("appearance-menu" if value == "HighContrast" else f"{value.lower()}-menu")
             click(label)
-            wait(lambda: state_path.exists() and json.loads(state_path.read_text())["appearance"] == value, f"persisted {value}")
+            wait(lambda: settings_path.exists() and json.loads(settings_path.read_text())["appearance"] == value, f"persisted {value}")
             if value in ("HighContrast", "Light"):
                 capture(value.lower())
 

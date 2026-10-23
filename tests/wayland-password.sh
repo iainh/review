@@ -67,7 +67,7 @@ capture() {
     fi
 }
 launch() {
-    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$1'" >/dev/null
+    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' XDG_CONFIG_HOME='$scratch/config' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/$1'" >/dev/null
 }
 
 # Startup authentication, incorrect password, and Escape without a prior PDF.

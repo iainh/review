@@ -17,7 +17,7 @@ cc -Wall -Wextra -Werror -I"$scratch" tests/wayland-pointer.c "$scratch/virtual-
     $(pkg-config --cflags --libs wayland-client) -o "$scratch/pointer"
 binary=$(realpath target/debug/review)
 geometry=$(realpath tests/pdf-page-geometry.py)
-swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/links.pdf'" >/dev/null
+swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' XDG_CONFIG_HOME='$scratch/config' WINIT_UNIX_BACKEND=wayland '$binary' '$scratch/links.pdf'" >/dev/null
 
 title() {
     swaymsg -t get_tree | jq -r '.. | objects | select(.name? | strings | startswith("Review — links.pdf")) | .name'

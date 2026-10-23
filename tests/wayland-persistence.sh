@@ -18,7 +18,7 @@ state="$scratch/state/review/state.json"
 launch() {
     local argument=""
     if [[ -n ${1:-} ]]; then argument="'$scratch/$1'"; fi
-    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' WINIT_UNIX_BACKEND=wayland '$binary' $argument" >/dev/null
+    swaymsg "exec env -u DISPLAY XDG_STATE_HOME='$scratch/state' XDG_CONFIG_HOME='$scratch/config' WINIT_UNIX_BACKEND=wayland '$binary' $argument" >/dev/null
 }
 close() {
     swaymsg '[app_id="^review$"] kill' >/dev/null
