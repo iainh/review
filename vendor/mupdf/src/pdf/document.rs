@@ -858,6 +858,15 @@ impl PdfDocument {
         .map(|buf| unsafe { Buffer::from_raw(buf) })
     }
 
+    /// Serialize to an owned Rust byte vector, pre-sized to the native output length.
+    /// The native buffer is copied, then released through MuPDF's allocator.
+    pub fn to_vec_with_options(&self, options: PdfWriteOptions) -> Result<Vec<u8>, Error> {
+        let mut buf = self.write_with_options(options)?;
+        let mut bytes = Vec::with_capacity(buf.len());
+        buf.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
     pub fn write_to_with_options<W: Write>(
         &self,
         w: &mut W,

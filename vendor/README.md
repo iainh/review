@@ -45,6 +45,10 @@ through native layer APIs instead of editing PDF dictionaries and reopening a
 rendering copy. It validates references first and maps MuPDF 1.27.2's descending
 xref order explicitly. Existing layer tests cover pixels, text, worker views,
 printing, encryption and saving with the original layer defaults preserved.
+`PdfDocument::to_vec_with_options` pre-sizes a Rust byte vector to the native
+serialized length. It still copies the native buffer and releases it through
+MuPDF's allocator; it does not transfer allocator ownership or provide zero-copy
+output. Review's isolated edit candidate uses this API with `Encryption::Keep`.
 Remove these patches when upstream provides equivalent safe APIs and fixes
 permission conversion; keep their regression tests.
 

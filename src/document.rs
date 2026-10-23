@@ -256,11 +256,7 @@ impl PdfDocument {
         change(&mut candidate.document)?;
         let mut options = mupdf::pdf::PdfWriteOptions::default();
         options.set_encryption(mupdf::pdf::Encryption::Keep);
-        let mut bytes = Vec::new();
-        candidate
-            .document
-            .write_to_with_options(&mut bytes, options)?;
-        let bytes = Arc::new(bytes);
+        let bytes = Arc::new(candidate.document.to_vec_with_options(options)?);
         let mut reopened = Self::from_bytes(
             &self.path,
             bytes.clone(),
