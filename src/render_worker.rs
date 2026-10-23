@@ -1,13 +1,17 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex, mpsc},
 };
 
-use crate::document::{PageImage, PdfDocument, WorkerSource};
+use crate::document::{PageImage, PdfDocument, RecordedPage, WorkerSource};
 
 const CACHE_BYTES: usize = 128 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 12;
 const TILE_ENTRIES: usize = 128;
+const RASTER_WORKERS: usize = 2;
+// Separate from retained cache pixels: includes concurrent RGB pixmaps (with
+// guard pixels) AND their RGBA conversion buffers, not just completed images.
+const IN_FLIGHT_BYTES: u64 = 256 * 1024 * 1024;
 pub const TILE_SIDE: u32 = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -155,7 +159,9 @@ impl Cached {
 struct State {
     queue: VecDeque<RenderKey>,
     wanted: HashSet<RenderKey>,
-    active: Option<RenderKey>,
+    active: HashSet<RenderKey>,
+    source: Option<WorkerSource>,
+    generation: u64,
     cache: HashMap<RenderKey, Cached>,
     clock: u64,
     stopped: bool,
@@ -164,8 +170,16 @@ struct State {
 }
 
 impl State {
-    fn finish(&mut self, key: RenderKey, result: RenderResult) -> Option<egui::Context> {
-        self.active = None;
+    fn finish(
+        &mut self,
+        generation: u64,
+        key: RenderKey,
+        result: RenderResult,
+    ) -> Option<egui::Context> {
+        if generation != self.generation {
+            return None;
+        }
+        self.active.remove(&key);
         if !self.stopped && self.wanted.contains(&key) {
             self.insert(key, result);
             self.repaint.clone()
@@ -212,9 +226,11 @@ impl State {
     }
 }
 
-/// MuPDF documents and pages stay on their creating thread. Only owned pixels
-/// cross this boundary. Replacing a frame cancels queued work, and stale in-flight
-/// results are discarded; MuPDF's current page operation finishes normally.
+/// One owner opens documents and records pages; two persistent raster threads
+/// replay completed lists into private pixmaps. Only one page list is retained,
+/// shared by a bounded wave of jobs, and released when idle or changing pages.
+/// Frame replacement cancels queued jobs. Source replacement also invalidates
+/// in-flight results without spawning another pool or moving native documents.
 pub struct RenderWorker {
     shared: Arc<(Mutex<State>, Condvar)>,
     frame: Vec<(RenderKey, Priority)>,
@@ -222,49 +238,31 @@ pub struct RenderWorker {
 
 impl RenderWorker {
     pub fn new(source: WorkerSource) -> Self {
-        let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
+        let shared = Arc::new((
+            Mutex::new(State {
+                source: Some(source),
+                ..State::default()
+            }),
+            Condvar::new(),
+        ));
         let worker = shared.clone();
-        std::thread::spawn(move || {
-            let document = source.open().map_err(|error| format!("{error:#}"));
-            loop {
-                let (key, max_side) = {
-                    let (lock, wake) = &*worker;
-                    let mut state = lock.lock().unwrap();
-                    while !state.stopped && state.queue.is_empty() {
-                        state = wake.wait(state).unwrap();
-                    }
-                    if state.stopped {
-                        return;
-                    }
-                    let key = state.queue.pop_front().unwrap();
-                    if state.cache.contains_key(&key) || !state.wanted.contains(&key) {
-                        continue;
-                    }
-                    state.active = Some(key);
-                    (key, state.max_side)
-                };
-                let result = match &document {
-                    Ok(document) => render(document, key, max_side)
-                        .map(Arc::new)
-                        .map_err(|error| format!("{error:#}")),
-                    Err(error) => Err(error.clone()),
-                };
-                let repaint = {
-                    let mut state = worker.0.lock().unwrap();
-                    if state.stopped {
-                        return;
-                    }
-                    state.finish(key, result)
-                };
-                if let Some(ctx) = repaint {
-                    ctx.request_repaint()
-                }
-            }
-        });
+        std::thread::spawn(move || run(worker));
         Self {
             shared,
             frame: Vec::new(),
         }
+    }
+
+    pub fn replace_source(&mut self, source: WorkerSource) {
+        let mut state = self.shared.0.lock().unwrap();
+        state.generation += 1;
+        state.source = Some(source);
+        state.queue.clear();
+        state.wanted.clear();
+        state.active.clear();
+        state.cache.clear();
+        self.frame.clear();
+        self.shared.1.notify_one();
     }
 
     pub fn begin_frame(&mut self) {
@@ -295,7 +293,7 @@ impl RenderWorker {
             .iter()
             .map(|(key, _)| *key)
             .filter(|key| {
-                state.active != Some(*key) && !state.cache.contains_key(key) && queued.insert(*key)
+                !state.active.contains(key) && !state.cache.contains_key(key) && queued.insert(*key)
             })
             .collect();
         self.shared.1.notify_one();
@@ -309,21 +307,234 @@ impl Drop for RenderWorker {
     }
 }
 
+struct TileJob {
+    key: RenderKey,
+    generation: u64,
+    page: Arc<RecordedPage>,
+}
+
+fn complete(
+    shared: &(Mutex<State>, Condvar),
+    generation: u64,
+    key: RenderKey,
+    result: RenderResult,
+) {
+    let repaint = shared.0.lock().unwrap().finish(generation, key, result);
+    if let Some(ctx) = repaint {
+        ctx.request_repaint();
+    }
+}
+
+fn run(shared: Arc<(Mutex<State>, Condvar)>) {
+    // No raster backlog: the owner submits at most two jobs, then waits for
+    // both before recording another page. A list cannot accumulate per tile,
+    // page, scale, or revision. Native resources referenced by a single list
+    // have document-dependent size; there is deliberately no list cache.
+    let (send, receive) = mpsc::sync_channel::<TileJob>(RASTER_WORKERS);
+    let receive = Mutex::new(receive);
+    let (done, completed) = mpsc::channel();
+    std::thread::scope(|scope| {
+        for _ in 0..RASTER_WORKERS {
+            let (receive, shared, done) = (&receive, &shared, &done);
+            scope.spawn(move || {
+                loop {
+                    let Ok(job) = receive.lock().unwrap().recv() else {
+                        break;
+                    };
+                    let wanted = {
+                        let state = shared.0.lock().unwrap();
+                        !state.stopped
+                            && state.generation == job.generation
+                            && state.wanted.contains(&job.key)
+                    };
+                    if wanted {
+                        let result = job
+                            .page
+                            .render_region(job.key.scale(), job.key.region.unwrap())
+                            .map(Arc::new)
+                            .map_err(|error| format!("{error:#}"));
+                        complete(shared, job.generation, job.key, result);
+                    } else {
+                        let mut state = shared.0.lock().unwrap();
+                        if state.generation == job.generation {
+                            state.active.remove(&job.key);
+                        }
+                    }
+                    drop(job);
+                    done.send(()).unwrap();
+                }
+            });
+        }
+        let mut document = None;
+        let mut recording = None;
+        loop {
+            let (keys, generation, max_side, source) = {
+                let mut state = shared.0.lock().unwrap();
+                while !state.stopped && state.queue.is_empty() && state.source.is_none() {
+                    recording = None;
+                    state = shared.1.wait(state).unwrap();
+                }
+                if state.stopped {
+                    break;
+                }
+                let source = state.source.take();
+                let generation = state.generation;
+                let max_side = state.max_side;
+                let mut keys = Vec::new();
+                let mut bytes = 0_u64;
+                while let Some(&key) = state.queue.front() {
+                    if keys.len() == RASTER_WORKERS
+                        || keys.first().is_some_and(|first: &RenderKey| {
+                            first.page != key.page || first.region.is_none() || key.region.is_none()
+                        })
+                    {
+                        break;
+                    }
+                    // A tile holds RGB guard pixels while constructing RGBA.
+                    // Invalid requests are reported by the normal preflight.
+                    let reservation = key.region.map_or(0, |[x0, y0, x1, y1]| {
+                        let w = u64::from(x1.saturating_sub(x0));
+                        let h = u64::from(y1.saturating_sub(y0));
+                        (w + 4)
+                            .saturating_mul(h + 4)
+                            .saturating_mul(3)
+                            .saturating_add(w.saturating_mul(h).saturating_mul(4))
+                    });
+                    if !keys.is_empty() && bytes.saturating_add(reservation) > IN_FLIGHT_BYTES {
+                        break;
+                    }
+                    state.queue.pop_front();
+                    if state.cache.contains_key(&key) || !state.wanted.contains(&key) {
+                        continue;
+                    }
+                    if key.region.is_some() {
+                        let validation = validate_region(key, max_side).and_then(|()| {
+                            anyhow::ensure!(
+                                reservation <= IN_FLIGHT_BYTES,
+                                "rendering region exceeds the in-flight memory limit"
+                            );
+                            Ok(())
+                        });
+                        if let Err(error) = validation {
+                            if let Some(ctx) =
+                                state.finish(generation, key, Err(format!("{error:#}")))
+                            {
+                                ctx.request_repaint();
+                            }
+                            continue;
+                        }
+                    }
+                    bytes += reservation;
+                    state.active.insert(key);
+                    keys.push(key);
+                }
+                (keys, generation, max_side, source)
+            };
+            if let Some(source) = source {
+                recording = None;
+                drop(document.take());
+                document = Some(source.open().map_err(|error| format!("{error:#}")));
+            }
+            let Some(&first) = keys.first() else { continue };
+            let document = document.as_ref().unwrap();
+            if first.region.is_some()
+                && recording
+                    .as_ref()
+                    .is_none_or(|(page, _)| *page != first.page)
+            {
+                drop(recording.take());
+                recording = Some((
+                    first.page,
+                    document.as_ref().map_err(Clone::clone).and_then(|doc| {
+                        doc.record_page(first.page)
+                            .map(Arc::new)
+                            .map_err(|error| format!("{error:#}"))
+                    }),
+                ));
+            } else if first.region.is_none() {
+                recording = None;
+            }
+            let mut dispatched = 0;
+            for key in keys {
+                let state = shared.0.lock().unwrap();
+                let wanted =
+                    !state.stopped && state.generation == generation && state.wanted.contains(&key);
+                drop(state);
+                if !wanted {
+                    let mut state = shared.0.lock().unwrap();
+                    if state.generation == generation {
+                        state.active.remove(&key);
+                    }
+                    continue;
+                }
+                let result = document
+                    .as_ref()
+                    .map_err(Clone::clone)
+                    .and_then(|document| {
+                        if key.region.is_some() {
+                            let page = recording
+                                .as_ref()
+                                .unwrap()
+                                .1
+                                .as_ref()
+                                .map_err(Clone::clone)?;
+                            send.send(TileJob {
+                                key,
+                                generation,
+                                page: page.clone(),
+                            })
+                            .unwrap();
+                            dispatched += 1;
+                            Ok(None)
+                        } else {
+                            render(document, key, max_side)
+                                .map(Arc::new)
+                                .map(Some)
+                                .map_err(|error| format!("{error:#}"))
+                        }
+                    });
+                match result {
+                    Ok(None) => {}
+                    Ok(Some(image)) => complete(&shared, generation, key, Ok(image)),
+                    Err(error) => complete(&shared, generation, key, Err(error)),
+                }
+            }
+            for _ in 0..dispatched {
+                completed.recv().unwrap();
+            }
+        }
+        drop(send);
+    });
+}
+
+fn validate_region(key: RenderKey, max_side: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        key.scale().is_finite() && key.scale() > 0.0,
+        "invalid rendering scale"
+    );
+    let [x0, y0, x1, y1] = key.region.unwrap();
+    anyhow::ensure!(
+        x0 < x1 && y0 < y1 && x1 <= i32::MAX as u32 && y1 <= i32::MAX as u32,
+        "invalid rendering region"
+    );
+    anyhow::ensure!(
+        (x1 - x0) as usize <= max_side && (y1 - y0) as usize <= max_side,
+        "rendering region exceeds the graphics texture limit"
+    );
+    anyhow::ensure!(
+        u64::from(x1 - x0) * u64::from(y1 - y0) * 4 <= CACHE_BYTES as u64,
+        "rendering region exceeds the memory limit"
+    );
+    Ok(())
+}
+
 fn render(document: &PdfDocument, key: RenderKey, max_side: usize) -> anyhow::Result<PageImage> {
     anyhow::ensure!(
         key.scale().is_finite() && key.scale() > 0.0,
         "invalid rendering scale"
     );
     if let Some([x0, y0, x1, y1]) = key.region {
-        anyhow::ensure!(x0 < x1 && y0 < y1, "invalid rendering region");
-        anyhow::ensure!(
-            (x1 - x0) as usize <= max_side && (y1 - y0) as usize <= max_side,
-            "rendering region exceeds the graphics texture limit"
-        );
-        anyhow::ensure!(
-            u64::from(x1 - x0) * u64::from(y1 - y0) * 4 <= CACHE_BYTES as u64,
-            "rendering region exceeds the memory limit"
-        );
+        validate_region(key, max_side)?;
         return document.render_region(key.page, key.scale(), [x0, y0, x1, y1]);
     }
     let size = document.page_size(key.page)?;
@@ -353,6 +564,104 @@ fn render(document: &PdfDocument, key: RenderKey, max_side: usize) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn images(worker: &mut RenderWorker, keys: &[RenderKey]) -> Vec<Arc<PageImage>> {
+        let ctx = egui::Context::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            worker.begin_frame();
+            let images: Vec<_> = keys
+                .iter()
+                .map(|&key| worker.image(key, Priority::Page))
+                .collect();
+            worker.end_frame(&ctx);
+            if let Some(images) = images.into_iter().collect::<Option<Vec<_>>>() {
+                return images.into_iter().map(Result::unwrap).collect();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn parallel_tiles_follow_source_replacement_layers_annotations_and_undo() {
+        use crate::annotations::{Geometry, Kind};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("layers.pdf");
+        std::fs::write(&path, crate::inspection::tests::fixture()).unwrap();
+        let mut document = PdfDocument::open(path).unwrap();
+        let keys = [
+            [183, 531, 423, 657],
+            [0, 0, 201, 301],
+            [399, 499, 599, 799],
+            [39, 699, 155, 799],
+        ]
+        .map(|region| RenderKey {
+            region: Some(region),
+            ..RenderKey::new(0, 2.0)
+        });
+        let mut worker = RenderWorker::new(document.worker_source());
+        let check = |worker: &mut RenderWorker, document: &PdfDocument| {
+            let images = images(worker, &keys);
+            for (image, key) in images.iter().zip(keys) {
+                assert_eq!(
+                    image.rgba(),
+                    document
+                        .render_region(0, key.scale(), key.region.unwrap())
+                        .unwrap()
+                        .rgba()
+                );
+            }
+            images
+        };
+        let original = check(&mut worker, &document);
+        let mut layers = crate::inspection::Inspection::read(document.pdf())
+            .layers
+            .unwrap();
+        layers[0].enabled = false;
+        document.set_layer_visibility(&layers).unwrap();
+        worker.replace_source(document.worker_source());
+        let hidden = check(&mut worker, &document);
+        assert_ne!(original[0].pixels, hidden[0].pixels);
+        document
+            .add_annotation(
+                0,
+                Kind::Ink,
+                Geometry::Ink(vec![vec![[0.1, 0.1], [0.3, 0.25]]]),
+                "parallel ink",
+                [1.0, 0.0, 0.0],
+                3.0,
+            )
+            .unwrap();
+        worker.replace_source(document.worker_source());
+        let annotated = check(&mut worker, &document);
+        assert_ne!(hidden[1].pixels, annotated[1].pixels);
+        document.undo().unwrap();
+        // Replace queued requests repeatedly, including identical render keys.
+        // Old revisions must not satisfy the final frame or retain a pool.
+        for _ in 0..20 {
+            worker.replace_source(document.worker_source());
+            worker.begin_frame();
+            for key in keys {
+                worker.image(key, Priority::Page);
+            }
+            worker.end_frame(&egui::Context::default());
+        }
+        let undone = check(&mut worker, &document);
+        for (image, expected) in undone.iter().zip(&hidden) {
+            assert_eq!(image.pixels, expected.pixels);
+        }
+        layers[0].enabled = true;
+        document.set_layer_visibility(&layers).unwrap();
+        worker.replace_source(document.worker_source());
+        let restored = check(&mut worker, &document);
+        for (image, expected) in restored.iter().zip(&original) {
+            assert_eq!(image.pixels, expected.pixels);
+        }
+    }
 
     #[test]
     fn asymmetric_visible_tiles_have_exact_cores_and_overlap_bounds() {
@@ -427,9 +736,11 @@ mod tests {
         let unit = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
         let tiles = visible_tiles(key, (300.0, 400.0), unit, 258).unwrap();
         assert_eq!(tiles.len(), 20);
-        for tile in tiles {
+        let mut worker = RenderWorker::new(document.worker_source());
+        let keys: Vec<_> = tiles.iter().map(|tile| tile.key).collect();
+        let rendered = images(&mut worker, &keys);
+        for (tile, image) in tiles.into_iter().zip(rendered) {
             let [x0, y0, x1, y1] = tile.key.region.unwrap();
-            let image = render(&document, tile.key, 258).unwrap();
             assert_eq!((image.width, image.height), (x1 - x0, y1 - y0));
             for y in y0..y1 {
                 let full_start = ((y * full.width + x0) * 4) as usize;
@@ -459,8 +770,9 @@ mod tests {
         assert!(!state.cache.contains_key(&key(0)));
         let wanted = key(1000);
         state.wanted.insert(wanted);
-        state.finish(key(1001), Err("old pan".into()));
+        state.finish(0, key(1001), Err("old pan".into()));
         state.finish(
+            0,
             RenderKey {
                 scale: 1.0_f32.to_bits(),
                 ..wanted
@@ -472,7 +784,7 @@ mod tests {
             scale: 1.0_f32.to_bits(),
             ..wanted
         }));
-        state.finish(wanted, Err("current".into()));
+        state.finish(0, wanted, Err("current".into()));
         assert!(state.cache.contains_key(&wanted));
     }
 
@@ -527,6 +839,12 @@ mod tests {
         let document = PdfDocument::open(path).unwrap();
         let full = document.render_at_scale(0, 2.0).unwrap();
         let tile = document.render_region(0, 2.0, [39, 71, 221, 401]).unwrap();
+        let mut worker = RenderWorker::new(document.worker_source());
+        let key = RenderKey {
+            region: Some([39, 71, 221, 401]),
+            ..RenderKey::new(0, 2.0)
+        };
+        assert_eq!(images(&mut worker, &[key])[0].pixels, tile.pixels);
         assert_eq!((tile.width, tile.height), (182, 330));
         for y in 0..330 {
             let start = y * 182 * 4;
@@ -634,15 +952,20 @@ mod tests {
         let wanted = RenderKey::new(1, 2.0);
         let mut state = State::default();
         state.wanted.insert(wanted);
-        state.active = Some(stale);
-        state.finish(stale, Err("stale".into()));
+        state.active.insert(stale);
+        state.finish(0, stale, Err("stale".into()));
         assert!(state.cache.is_empty());
-        assert_eq!(state.active, None);
-        state.finish(wanted, Err("wanted".into()));
+        assert!(state.active.is_empty());
+        state.finish(0, wanted, Err("wanted".into()));
         assert!(state.cache.contains_key(&wanted));
         state.cache.clear();
+        state.generation = 1;
+        state.active.insert(wanted);
+        state.finish(0, wanted, Err("old revision, identical key".into()));
+        assert!(state.cache.is_empty());
+        assert!(state.active.contains(&wanted));
         state.stopped = true;
-        state.finish(wanted, Err("after stop".into()));
+        state.finish(1, wanted, Err("after stop".into()));
         assert!(state.cache.is_empty());
     }
 

@@ -187,7 +187,8 @@ impl Viewer {
     }
 
     fn invalidate_document(&mut self, ctx: &Context) {
-        self.render_worker = RenderWorker::new(self.document.worker_source());
+        self.render_worker
+            .replace_source(self.document.worker_source());
         self.reading.displayed.clear();
         self.reading.textures.clear();
         self.sidebar.clear_previews();
@@ -1089,7 +1090,8 @@ impl Viewer {
             }
         });
         if shortcuts && self.inspector.ui(&ctx, &mut self.document) {
-            self.render_worker = RenderWorker::new(self.document.worker_source());
+            self.render_worker
+                .replace_source(self.document.worker_source());
             self.reading.displayed.clear();
             self.reading.textures.clear();
             self.sidebar.clear_previews();

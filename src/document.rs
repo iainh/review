@@ -16,6 +16,21 @@ pub struct PageImage {
     pub pixels: Arc<egui::ColorImage>,
 }
 
+/// A completed, immutable recording. Unlike native documents and pages, MuPDF
+/// display lists can be replayed on other threads into thread-owned pixmaps.
+pub(crate) struct RecordedPage {
+    list: mupdf::DisplayList,
+    bounds: mupdf::Rect,
+}
+
+impl RecordedPage {
+    pub(crate) fn render_region(&self, scale: f32, region: [u32; 4]) -> Result<PageImage> {
+        render_region(self.bounds, scale, region, |device, matrix, area| {
+            Ok(self.list.run(device, matrix, area)?)
+        })
+    }
+}
+
 impl PageImage {
     pub fn rgba(&self) -> &[u8] {
         self.pixels.as_raw()
@@ -696,69 +711,92 @@ impl PdfDocument {
         region: [u32; 4],
     ) -> Result<PageImage> {
         ensure!(page_number < self.page_count, "page is out of range");
-        ensure!(scale.is_finite() && scale > 0.0, "invalid rendering scale");
-        let [x0, y0, x1, y1] = region;
-        ensure!(
-            x0 < x1 && y0 < y1 && x1 <= i32::MAX as u32 && y1 <= i32::MAX as u32,
-            "invalid rendering region"
-        );
-        ensure!(
-            u64::from(x1 - x0) * u64::from(y1 - y0) <= 64_000_000,
-            "rendering region exceeds the memory limit"
-        );
         let page = self.document.load_page(page_number as i32)?;
-        let bounds = page.bounds()?;
-        let width = (f64::from(bounds.x1 - bounds.x0) * f64::from(scale)).ceil();
-        let height = (f64::from(bounds.y1 - bounds.y0) * f64::from(scale)).ceil();
-        ensure!(
-            x1 as f64 <= width && y1 as f64 <= height,
-            "rendering region is outside the page"
-        );
-        // MuPDF's scan conversion can change its last clipped pixel. Render
-        // two guard pixels beyond the returned overlap, then discard them.
-        let left = x0.saturating_sub(2);
-        let top = y0.saturating_sub(2);
-        let right = x1.saturating_add(2).min(width as u32);
-        let bottom = y1.saturating_add(2).min(height as u32);
-        ensure!(
-            u64::from(right - left) * u64::from(bottom - top) <= 64_000_000,
-            "rendering region exceeds the memory limit"
-        );
-        let mut pixmap = mupdf::Pixmap::new(
-            &Colorspace::device_rgb(),
-            left as i32,
-            top as i32,
-            (right - left) as i32,
-            (bottom - top) as i32,
-            false,
-        )?;
-        pixmap.clear_with(255)?;
-        let device = mupdf::Device::from_pixmap(&pixmap)?;
-        // The transform is identical for every tile, including fractional
-        // scales. Nonzero native bounds are normalized exactly once here.
-        page.run(&device, &page_raster_matrix(bounds, scale))?;
-        drop(device);
-        ensure!(pixmap.n() == 3, "MuPDF returned an unexpected pixel format");
-        let samples = pixmap.samples();
-        let mut pixels = Vec::with_capacity((x1 - x0) as usize * (y1 - y0) as usize);
-        for y in y0..y1 {
-            let start = ((y - top) as usize * (right - left) as usize + (x0 - left) as usize) * 3;
-            for pixel in samples[start..start + (x1 - x0) as usize * 3]
-                .as_chunks::<3>()
-                .0
-            {
-                pixels.push(egui::Color32::from_rgb(pixel[0], pixel[1], pixel[2]));
-            }
-        }
-        Ok(PageImage {
-            width: x1 - x0,
-            height: y1 - y0,
-            pixels: Arc::new(egui::ColorImage::new(
-                [(x1 - x0) as usize, (y1 - y0) as usize],
-                pixels,
-            )),
+        render_region(page.bounds()?, scale, region, |device, matrix, _| {
+            Ok(page.run(device, matrix)?)
         })
     }
+
+    pub(crate) fn record_page(&self, page_number: usize) -> Result<RecordedPage> {
+        ensure!(page_number < self.page_count, "page is out of range");
+        let page = self.document.load_page(page_number as i32)?;
+        Ok(RecordedPage {
+            bounds: page.bounds()?,
+            list: page.to_display_list(true)?,
+        })
+    }
+}
+
+fn render_region(
+    bounds: mupdf::Rect,
+    scale: f32,
+    region: [u32; 4],
+    run: impl FnOnce(&mupdf::Device, &Matrix, mupdf::Rect) -> Result<()>,
+) -> Result<PageImage> {
+    ensure!(scale.is_finite() && scale > 0.0, "invalid rendering scale");
+    let [x0, y0, x1, y1] = region;
+    ensure!(
+        x0 < x1 && y0 < y1 && x1 <= i32::MAX as u32 && y1 <= i32::MAX as u32,
+        "invalid rendering region"
+    );
+    ensure!(
+        u64::from(x1 - x0) * u64::from(y1 - y0) <= 64_000_000,
+        "rendering region exceeds the memory limit"
+    );
+    let width = (f64::from(bounds.x1 - bounds.x0) * f64::from(scale)).ceil();
+    let height = (f64::from(bounds.y1 - bounds.y0) * f64::from(scale)).ceil();
+    ensure!(
+        x1 as f64 <= width && y1 as f64 <= height,
+        "rendering region is outside the page"
+    );
+    // MuPDF's scan conversion can change its last clipped pixel. Render
+    // two guard pixels beyond the returned overlap, then discard them.
+    let left = x0.saturating_sub(2);
+    let top = y0.saturating_sub(2);
+    let right = x1.saturating_add(2).min(width as u32);
+    let bottom = y1.saturating_add(2).min(height as u32);
+    ensure!(
+        u64::from(right - left) * u64::from(bottom - top) <= 64_000_000,
+        "rendering region exceeds the memory limit"
+    );
+    let mut pixmap = mupdf::Pixmap::new(
+        &Colorspace::device_rgb(),
+        left as i32,
+        top as i32,
+        (right - left) as i32,
+        (bottom - top) as i32,
+        false,
+    )?;
+    pixmap.clear_with(255)?;
+    let device = mupdf::Device::from_pixmap(&pixmap)?;
+    // The transform is identical for every tile, including fractional
+    // scales. Nonzero native bounds are normalized exactly once here.
+    run(
+        &device,
+        &page_raster_matrix(bounds, scale),
+        mupdf::Rect::new(left as f32, top as f32, right as f32, bottom as f32),
+    )?;
+    drop(device);
+    ensure!(pixmap.n() == 3, "MuPDF returned an unexpected pixel format");
+    let samples = pixmap.samples();
+    let mut pixels = Vec::with_capacity((x1 - x0) as usize * (y1 - y0) as usize);
+    for y in y0..y1 {
+        let start = ((y - top) as usize * (right - left) as usize + (x0 - left) as usize) * 3;
+        for pixel in samples[start..start + (x1 - x0) as usize * 3]
+            .as_chunks::<3>()
+            .0
+        {
+            pixels.push(egui::Color32::from_rgb(pixel[0], pixel[1], pixel[2]));
+        }
+    }
+    Ok(PageImage {
+        width: x1 - x0,
+        height: y1 - y0,
+        pixels: Arc::new(egui::ColorImage::new(
+            [(x1 - x0) as usize, (y1 - y0) as usize],
+            pixels,
+        )),
+    })
 }
 
 fn page_raster_matrix(bounds: mupdf::Rect, scale: f32) -> Matrix {
