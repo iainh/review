@@ -41,6 +41,7 @@ impl Renderer {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                ..Default::default()
             })
             .await
             .context("no compatible graphics adapter found")?;
@@ -77,6 +78,7 @@ impl Renderer {
             desired_maximum_frame_latency: 2,
             alpha_mode,
             view_formats: vec![],
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
         let context = egui::Context::default();
@@ -220,12 +222,13 @@ impl Renderer {
                 // titlebar's widget ownership. stop_dragging alone leaves the
                 // pointer button down; process a release through normal input.
                 self.context.stop_dragging();
+                let modifiers = self.context.input(|input| input.modifiers);
                 let input = self.input.egui_input_mut();
                 input.events.push(egui::Event::PointerButton {
                     pos,
                     button: egui::PointerButton::Primary,
                     pressed: false,
-                    modifiers: input.modifiers,
+                    modifiers,
                 });
                 self.window.request_redraw();
             }
@@ -248,14 +251,17 @@ impl Renderer {
             .handle_platform_output(&self.window, output.platform_output);
         // Upload deltas even when the surface is temporarily unavailable. egui
         // will not resend them on the next frame.
-        for (id, delta) in &output.textures_delta.set {
-            self.painter
-                .update_texture(&self.device, &self.queue, *id, delta);
+        for (id, deltas) in &output.textures_delta.set {
+            for delta in deltas {
+                self.painter
+                    .update_texture(&self.device, &self.queue, *id, delta);
+            }
         }
         let result = self.paint(output.shapes, output.pixels_per_point);
         for id in &output.textures_delta.free {
             self.painter.free_texture(id);
         }
+        output.textures_delta.clear();
         result
     }
 
@@ -320,7 +326,7 @@ impl Renderer {
         self.queue
             .submit(commands.into_iter().chain([encoder.finish()]));
         self.window.pre_present_notify();
-        output.present();
+        self.queue.present(output);
         Ok(())
     }
 }

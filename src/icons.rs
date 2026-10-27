@@ -60,7 +60,7 @@ pub fn selectable_button(
         ui,
         egui::Button::new(text(icon))
             .selected(selected)
-            .min_size(egui::vec2(30.0, 30.0)),
+            .min_size(egui::Vec2::splat(crate::native_ui::CONTROL_HEIGHT)),
         selected,
     )
     .on_hover_text(label);
@@ -83,11 +83,16 @@ mod tests {
                 .insert(FontFamily::Proportional, vec!["native-only".into()]);
         }
         reference.set_fonts(fonts);
-        let _ = reference.run_ui(Default::default(), |_| {});
+        reference
+            .run_ui(Default::default(), |_| {})
+            .textures_delta
+            .clear();
 
         let ctx = egui::Context::default();
         install(&ctx);
-        let _ = ctx.run_ui(Default::default(), |_| {});
+        ctx.run_ui(Default::default(), |_| {})
+            .textures_delta
+            .clear();
         let font = FontId::proportional(13.0);
         for character in "Review Wi1…".chars() {
             let expected = reference.fonts_mut(|fonts| fonts.glyph_width(&font, character));
@@ -99,7 +104,16 @@ mod tests {
             for icon in [Icon::Search, Icon::ArrowRight, Icon::ZoomIn] {
                 assert!(fonts.has_glyph(&icon_font, char::from(icon)));
             }
-            assert!(fonts.has_glyph(&FontId::monospace(13.0), 'W'));
+            // egui 0.36 has_glyph reports false for any character sharing
+            // the replacement glyph's face. Check layout and rasterized glyphs instead.
+            let mono = FontId::monospace(13.0);
+            let width = fonts.glyph_width(&mono, 'W');
+            assert!(width > 0.0);
+            assert_eq!(width, fonts.glyph_width(&mono, 'i'));
+            let galley = fonts.layout_no_wrap("Wi\u{fffd}".into(), mono, egui::Color32::WHITE);
+            let glyphs = &galley.rows[0].glyphs;
+            assert_ne!(glyphs[0].uv_rect.min, glyphs[2].uv_rect.min);
+            assert_ne!(glyphs[1].uv_rect.min, glyphs[2].uv_rect.min);
         });
     }
 }

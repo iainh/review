@@ -1101,7 +1101,7 @@ fn app_ui(
         let mut cancel = !blocked
             && !viewer.as_ref().is_some_and(Viewer::modal_open)
             && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
-        egui::Panel::top("loading_pdf").show_inside(root, |ui| {
+        egui::Panel::top("loading_pdf").show(root, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 cancel |= ui.button("Cancel loading").clicked();
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -1127,39 +1127,37 @@ fn app_ui(
         viewer.ui(root, &mut open_requested);
     } else {
         let frame = egui::Frame::central_panel(root.style()).fill(root.visuals().faint_bg_color);
-        egui::CentralPanel::default()
-            .frame(frame)
-            .show_inside(root, |ui| {
-                if loading.is_some() {
-                    return;
+        egui::CentralPanel::default().frame(frame).show(root, |ui| {
+            if loading.is_some() {
+                return;
+            }
+            ui.vertical_centered(|ui| {
+                ui.add_space(((ui.available_height() - 190.0) * 0.5).max(0.0));
+                ui.label(
+                    egui::RichText::new(char::from(icons::Icon::FileText).to_string())
+                        .size(40.0)
+                        .color(ui.visuals().weak_text_color()),
+                );
+                ui.add_space(14.0);
+                ui.label(egui::RichText::new("No document open").size(20.0));
+                ui.add_space(8.0);
+                ui.weak("Open a PDF, or drop one anywhere in this window.");
+                ui.add_space(16.0);
+                if native_ui::studio_button(
+                    ui,
+                    egui::Button::new("Open…")
+                        .selected(true)
+                        .min_size(egui::vec2(110.0, 30.0)),
+                    true,
+                )
+                .clicked()
+                {
+                    open_requested = true;
                 }
-                ui.vertical_centered(|ui| {
-                    ui.add_space(((ui.available_height() - 190.0) * 0.5).max(0.0));
-                    ui.label(
-                        egui::RichText::new(char::from(icons::Icon::FileText).to_string())
-                            .size(40.0)
-                            .color(ui.visuals().weak_text_color()),
-                    );
-                    ui.add_space(14.0);
-                    ui.label(egui::RichText::new("No document open").size(20.0));
-                    ui.add_space(8.0);
-                    ui.weak("Open a PDF, or drop one anywhere in this window.");
-                    ui.add_space(16.0);
-                    if native_ui::studio_button(
-                        ui,
-                        egui::Button::new("Open…")
-                            .selected(true)
-                            .min_size(egui::vec2(110.0, 30.0)),
-                        true,
-                    )
-                    .clicked()
-                    {
-                        open_requested = true;
-                    }
-                    ui.add_space(8.0);
-                    ui.weak("Ctrl+O / Cmd+O");
-                });
+                ui.add_space(8.0);
+                ui.weak("Ctrl+O / Cmd+O");
             });
+        });
     }
     if let Some(error) = open_error.as_ref() {
         let mut dismiss = false;
@@ -1689,7 +1687,7 @@ mod tests {
         events: Vec<egui::Event>,
     ) -> ((bool, bool, bool), egui::FullOutput) {
         let mut action = (false, false, false);
-        let output = ctx.run_ui(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1709,6 +1707,7 @@ mod tests {
                 )
             },
         );
+        output.textures_delta.clear();
         (action, output)
     }
 
@@ -2216,19 +2215,22 @@ mod tests {
             }],
             ..Default::default()
         };
-        let _ = egui::Context::default().run_ui(input, |ui| {
-            assert_eq!(
-                app_ui(
-                    &mut app.viewer,
-                    &mut app.open_error,
-                    &mut app.password_prompt,
-                    &mut app.loading,
-                    ui,
-                    &mut app.native_ui,
-                ),
-                (false, false, false)
-            );
-        });
+        egui::Context::default()
+            .run_ui(input, |ui| {
+                assert_eq!(
+                    app_ui(
+                        &mut app.viewer,
+                        &mut app.open_error,
+                        &mut app.password_prompt,
+                        &mut app.loading,
+                        ui,
+                        &mut app.native_ui,
+                    ),
+                    (false, false, false)
+                );
+            })
+            .textures_delta
+            .clear();
         assert!(app.open_error.is_none());
     }
 
@@ -2253,16 +2255,19 @@ mod tests {
                 .to_vec(),
             ..Default::default()
         };
-        let _ = egui::Context::default().run_ui(input, |ui| {
-            app_ui(
-                &mut app.viewer,
-                &mut app.open_error,
-                &mut app.password_prompt,
-                &mut app.loading,
-                ui,
-                &mut app.native_ui,
-            );
-        });
+        egui::Context::default()
+            .run_ui(input, |ui| {
+                app_ui(
+                    &mut app.viewer,
+                    &mut app.open_error,
+                    &mut app.password_prompt,
+                    &mut app.loading,
+                    ui,
+                    &mut app.native_ui,
+                );
+            })
+            .textures_delta
+            .clear();
         assert!(app.viewer.as_ref().unwrap().title().ends_with("2/2 — 125%"));
         let path = directory.path().join("new document.pdf");
         std::fs::write(&path, document::tests::sample_pdf("", false)).unwrap();
@@ -2706,19 +2711,22 @@ mod tests {
                 }],
                 ..Default::default()
             };
-            let _ = egui::Context::default().run_ui(input, |ui| {
-                assert_eq!(
-                    app_ui(
-                        &mut viewer,
-                        &mut None,
-                        &mut None,
-                        &mut None,
-                        ui,
-                        &mut native_ui::NativeUi::default()
-                    ),
-                    (true, false, false)
-                );
-            });
+            egui::Context::default()
+                .run_ui(input, |ui| {
+                    assert_eq!(
+                        app_ui(
+                            &mut viewer,
+                            &mut None,
+                            &mut None,
+                            &mut None,
+                            ui,
+                            &mut native_ui::NativeUi::default()
+                        ),
+                        (true, false, false)
+                    );
+                })
+                .textures_delta
+                .clear();
         }
     }
 }

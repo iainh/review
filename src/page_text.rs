@@ -58,7 +58,7 @@ impl PageText {
             .default_size(340.0)
             .size_range(240.0..=600.0)
             .resizable(true)
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 let label = ui.heading(format!("Page {} text", page + 1));
                 ui.label("Extracted order may differ from reading order.");
                 if !copy_allowed {
@@ -139,7 +139,7 @@ mod tests {
             let mut pane = PageText::default();
             pane.toggle(&ctx);
             let mut frame = |events| {
-                ctx.run_ui(
+                let mut output = ctx.run_ui(
                     RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,
@@ -149,7 +149,9 @@ mod tests {
                         ..Default::default()
                     },
                     |ui| pane.ui(ui, &document),
-                )
+                );
+                output.textures_delta.clear();
+                output
             };
             frame(vec![]);
             let output = frame(vec![]);
@@ -217,7 +219,7 @@ mod tests {
             let mut pane = PageText::default();
             pane.toggle(&ctx);
             let mut frame = |events| {
-                ctx.run_ui(
+                let mut output = ctx.run_ui(
                     RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,
@@ -227,7 +229,9 @@ mod tests {
                         ..Default::default()
                     },
                     |ui| pane.ui(ui, &document),
-                )
+                );
+                output.textures_delta.clear();
+                output
             };
             frame(vec![]);
             for word in ["amber fox", "violet river"] {

@@ -75,15 +75,15 @@ Original crate SHA-256:
 `340fa91344f2f378f3f3e4996d459594a6a6f9b1281cb232c320a94aa5c40a43`.
 
 The published manifest requires egui/eframe 0.33.3. Its context and widget
-types cannot interoperate with Review's egui 0.34.3. This local dependency
-uses egui 0.34.3 without downgrading Review or changing winit/wgpu. The
+types cannot interoperate with Review's egui 0.36.2. This local dependency
+uses egui 0.36.2 alongside Review's winit 0.30 and wgpu 30 renderer. The
 eframe-only rounded-corner and OS interop modules, examples and unrelated
 image loaders are omitted. Optional image icons remain supported by egui;
 Review uses a text brand instead of the upstream default app icon.
 
 Library adaptations:
 
-- Render titlebars with egui 0.34's `Panel::show_inside` on the root `Ui`.
+- Render titlebars with egui 0.36's `Panel::show` on the root `Ui`.
   Update renamed methods and explicit `f32` stroke widths.
 - Keep shortcut hints, but do not automatically run shortcut callbacks while
   drawing. Review owns dispatch, focused-field gates and modal protection.
@@ -134,3 +134,38 @@ page run can change fractional-scale image sampling. The tile prototype's
 in-place guarded crop did not show a consistent end-to-end benefit, so tiles
 retain their existing RGB raster, guards, conversion and cache accounting.
 Printing and OCR also retain the existing native opaque RGB path.
+
+# Solidcraft-inspired shell styling
+
+`src/native_ui.rs` adapts a small subset of the semantic light/dark palette from
+Solidcraft's `crates/ui-egui/src/theme.rs`, with Review-specific canvas, contrast
+and focus colours. The docked surface policy and shared control metrics follow
+the same design approach; Review does not depend on Solidcraft's CAD UI crate,
+import its assets or change PDF page colours.
+
+Source: <https://github.com/tangency-labs/solidcraft/tree/367aa249bce2eea58346c41a40e7f9f3c677112d>.
+Used under its MIT licence:
+
+```text
+MIT License
+
+Copyright (c) 2026 SolidCraft contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

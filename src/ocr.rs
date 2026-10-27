@@ -167,7 +167,7 @@ impl Ocr {
         if self.languages.is_none() && self.job.is_none() && self.status.is_empty() {
             self.launch(&ctx, None);
         }
-        egui::Panel::top("ocr_panel").show_inside(root, |ui| {
+        egui::Panel::top("ocr_panel").show(root, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Local OCR");
                 ui.add_enabled_ui(self.job.is_none(), |ui| {

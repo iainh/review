@@ -528,7 +528,7 @@ impl Forms {
             });
         }
         let mut change = None;
-        egui::Panel::right("forms").default_size(280.0).size_range(240.0..=400.0).show_inside(root, |ui| {
+        egui::Panel::right("forms").default_size(280.0).size_range(240.0..=400.0).show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Forms");
                 if ui.button("Close").clicked() { self.open = false; }
@@ -830,6 +830,8 @@ pub(crate) mod tests {
                         activated = forms.page_ui(ui, &mut document, &pages).unwrap();
                     },
                 )
+                .textures_delta
+                .clear();
             };
             run(Vec::new());
             for pressed in [true, false] {
@@ -848,9 +850,10 @@ pub(crate) mod tests {
             assert!(forms.open);
             assert_eq!(forms.focus, Some(26));
             assert!(!document.is_dirty());
-            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 forms.page_ui(ui, &mut document, &pages).unwrap();
             });
+            output.textures_delta.clear();
             assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect)
                 if rect.rect.min.distance(expected.min) < 0.01 && rect.rect.max.distance(expected.max) < 0.01)), "Missing transformed outline for {rotation:?}");
         }

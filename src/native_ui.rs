@@ -57,125 +57,198 @@ impl Appearance {
             ctx.set_visuals_of(Theme::Dark, visuals);
         }
         ctx.set_theme(theme);
+        ctx.all_styles_mut(|style| {
+            style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+            style.spacing.button_padding = egui::vec2(6.0, 4.0);
+            style.spacing.interact_size.y = CONTROL_HEIGHT;
+        });
         ctx.request_repaint();
     }
 }
 
-/// Neutral studio surfaces, sampled from ImageFlow. Keep paper colours separate.
+pub const CONTROL_HEIGHT: f32 = 28.0;
+
+/// Review's subset of Solidcraft's semantic palette. See vendor/README.md for provenance.
+/// These colours belong to the shell, never the PDF page or its annotations.
+struct Palette {
+    chrome: Color32,
+    toolbar: Color32,
+    panel: Color32,
+    canvas: Color32,
+    floating: Color32,
+    field: Color32,
+    border: Color32,
+    text: Color32,
+    dim: Color32,
+    accent: Color32,
+    selected: Color32,
+    hover: Color32,
+    focus: Color32,
+    error: Color32,
+    warning: Color32,
+}
+
+impl Palette {
+    fn new(dark: bool) -> Self {
+        let rgb = Color32::from_rgb;
+        if dark {
+            Self {
+                chrome: rgb(28, 31, 38),
+                toolbar: rgb(37, 41, 49),
+                panel: rgb(39, 43, 52),
+                canvas: rgb(46, 52, 64),
+                floating: rgb(47, 52, 62),
+                field: rgb(30, 34, 41),
+                border: rgb(63, 69, 82),
+                text: rgb(222, 226, 232),
+                dim: rgb(148, 155, 168),
+                accent: rgb(58, 136, 238),
+                selected: rgb(49, 66, 88),
+                hover: rgb(54, 61, 74),
+                focus: rgb(128, 182, 255),
+                error: rgb(240, 100, 96),
+                warning: rgb(236, 170, 70),
+            }
+        } else {
+            Self {
+                chrome: rgb(229, 232, 238),
+                toolbar: rgb(246, 247, 249),
+                panel: rgb(250, 251, 252),
+                canvas: rgb(223, 228, 235),
+                floating: Color32::WHITE,
+                field: Color32::WHITE,
+                border: rgb(201, 207, 217),
+                text: rgb(38, 42, 50),
+                dim: rgb(98, 106, 120),
+                accent: rgb(26, 100, 190),
+                selected: rgb(214, 230, 250),
+                hover: rgb(226, 234, 246),
+                focus: rgb(26, 100, 190),
+                error: rgb(180, 35, 35),
+                warning: rgb(134, 81, 10),
+            }
+        }
+    }
+}
+
+pub fn chrome_fill(visuals: &Visuals) -> Color32 {
+    if visuals.panel_fill == Color32::BLACK {
+        visuals.panel_fill
+    } else {
+        Palette::new(visuals.dark_mode).chrome
+    }
+}
+
+/// Docked toolbar bands stay square and flush; floating surfaces use egui's themed frames.
+pub fn toolbar_frame(style: &egui::Style) -> egui::Frame {
+    let fill = if style.visuals.panel_fill == Color32::BLACK {
+        style.visuals.panel_fill
+    } else {
+        Palette::new(style.visuals.dark_mode).toolbar
+    };
+    egui::Frame::side_top_panel(style)
+        .fill(fill)
+        .inner_margin(egui::Margin::symmetric(8, 6))
+}
+
+/// Keep related commands together when the toolbar wraps on a narrow window.
+pub fn toolbar_group(ui: &mut egui::Ui, label: &str, contents: impl FnOnce(&mut egui::Ui)) {
+    let id = ui.id().with(label);
+    let previous = ui.ctx().data(|data| data.get_temp::<egui::Vec2>(id));
+    // Wrapping needs the group's width before painting any child controls.
+    // Remember natural sizes without replaying the caller's command dispatch.
+    let desired = previous.unwrap_or(egui::vec2(ui.available_width(), CONTROL_HEIGHT));
+    let measured = ui
+        .allocate_ui_with_layout(desired, egui::Layout::top_down(egui::Align::Min), |ui| {
+            egui::Frame::new()
+                .fill(chrome_fill(ui.visuals()))
+                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(5, 4))
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.horizontal(contents);
+                        ui.label(
+                            egui::RichText::new(label)
+                                .size(10.0)
+                                .variation(b"wght", 600.0)
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    });
+                })
+                .response
+                .rect
+                .size()
+        })
+        .inner;
+    if previous != Some(measured) {
+        ui.ctx().data_mut(|data| data.insert_temp(id, measured));
+        ui.ctx().request_repaint();
+    }
+}
+
 fn studio_visuals(dark: bool) -> Visuals {
+    let palette = Palette::new(dark);
     let mut visuals = if dark {
         Visuals::dark()
     } else {
         Visuals::light()
     };
-    let grey = Color32::from_gray;
-    visuals.override_text_color = Some(grey(if dark { 214 } else { 40 }));
-    visuals.weak_text_color = Some(grey(if dark { 154 } else { 90 }));
-    visuals.panel_fill = grey(if dark { 50 } else { 225 });
-    visuals.window_fill = grey(if dark { 40 } else { 238 });
-    visuals.faint_bg_color = grey(if dark { 64 } else { 205 });
-    visuals.extreme_bg_color = grey(if dark { 25 } else { 250 });
-    visuals.selection.bg_fill = Color32::from_rgb(20, 115, 230);
-    visuals.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
-    visuals.hyperlink_color = Color32::from_rgb(62, 140, 235);
-    visuals.window_corner_radius = 2.into();
-    visuals.menu_corner_radius = 2.into();
-    visuals.window_stroke = Stroke::new(1.0_f32, grey(if dark { 26 } else { 140 }));
+    visuals.override_text_color = Some(palette.text);
+    visuals.weak_text_color = Some(palette.dim);
+    visuals.panel_fill = palette.panel;
+    visuals.window_fill = palette.floating;
+    visuals.faint_bg_color = palette.canvas;
+    visuals.extreme_bg_color = palette.field;
+    visuals.selection.bg_fill = palette.selected;
+    visuals.selection.stroke = Stroke::new(1.0_f32, palette.text);
+    visuals.hyperlink_color = palette.accent;
+    visuals.error_fg_color = palette.error;
+    visuals.warn_fg_color = palette.warning;
+    visuals.window_corner_radius = 8.into();
+    visuals.menu_corner_radius = 6.into();
+    visuals.window_stroke = Stroke::new(1.0_f32, palette.border);
+    visuals.window_shadow = egui::epaint::Shadow {
+        offset: [0, 4],
+        blur: 16,
+        spread: 0,
+        color: Color32::from_black_alpha(if dark { 55 } else { 30 }),
+    };
+    visuals.popup_shadow = visuals.window_shadow;
     for (widget, fill) in [
-        (
-            &mut visuals.widgets.noninteractive,
-            if dark { 50 } else { 225 },
-        ),
-        (&mut visuals.widgets.inactive, if dark { 51 } else { 230 }),
-        (&mut visuals.widgets.hovered, if dark { 70 } else { 245 }),
-        (&mut visuals.widgets.active, if dark { 42 } else { 195 }),
-        (&mut visuals.widgets.open, if dark { 62 } else { 205 }),
+        (&mut visuals.widgets.noninteractive, palette.panel),
+        (&mut visuals.widgets.inactive, palette.field),
+        (&mut visuals.widgets.hovered, palette.hover),
+        (&mut visuals.widgets.active, palette.selected),
+        (&mut visuals.widgets.open, palette.selected),
     ] {
-        widget.bg_fill = grey(fill);
-        widget.weak_bg_fill = grey(fill);
-        widget.bg_stroke = Stroke::new(1.0_f32, grey(if dark { 35 } else { 150 }));
-        widget.fg_stroke = Stroke::new(1.0_f32, grey(if dark { 196 } else { 40 }));
-        widget.corner_radius = 2.into();
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.bg_stroke = Stroke::new(1.0_f32, palette.border);
+        widget.fg_stroke = Stroke::new(1.0_f32, palette.text);
+        widget.corner_radius = 4.into();
         widget.expansion = 0.0;
     }
     visuals.widgets.noninteractive.bg_stroke = visuals.window_stroke;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, visuals.selection.bg_fill);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, palette.accent);
+    visuals.widgets.active.bg_stroke = Stroke::new(2.0_f32, palette.focus);
     visuals.text_edit_bg_color = Some(visuals.extreme_bg_color);
     visuals
 }
 
-/// A one-pixel raised edge, not grain or a gradient across the workspace.
-pub fn panel_bevel(ui: &egui::Ui) {
-    if ui.visuals().panel_fill == Color32::BLACK {
-        return;
-    }
-    let rect = ui.max_rect();
-    let colour = Color32::from_gray(if ui.visuals().dark_mode { 61 } else { 245 });
-    ui.painter()
-        .hline(rect.x_range(), rect.top(), Stroke::new(1.0_f32, colour));
-}
-
-/// Keep egui's button input, focus and accessibility; paint only its surface.
+/// Native egui states provide hover, disabled and keyboard focus feedback without a second painter.
 pub fn studio_button(ui: &mut egui::Ui, button: egui::Button<'_>, primary: bool) -> egui::Response {
-    if ui.visuals().panel_fill == Color32::BLACK {
-        return ui.add(button);
-    }
-    let background = ui.painter().add(egui::Shape::Noop);
-    let response = ui.add(button.fill(Color32::TRANSPARENT).stroke(Stroke::NONE));
-    if ui.is_rect_visible(response.rect) {
-        let down = response.is_pointer_button_down_on();
-        let hovered = response.hovered();
-        let dark = ui.visuals().dark_mode;
-        let (top, bottom) = if primary {
-            (
-                Color32::from_rgb(62, 140, 235),
-                Color32::from_rgb(20, 115, 230),
-            )
-        } else {
-            let (top, bottom) = if dark {
-                if hovered { (76, 66) } else { (59, 51) }
-            } else if hovered {
-                (250, 235)
-            } else {
-                (240, 220)
-            };
-            (Color32::from_gray(top), Color32::from_gray(bottom))
-        };
-        let (top, bottom) = if down { (bottom, top) } else { (top, bottom) };
-        let border = if response.has_focus() {
-            Stroke::new(2.0_f32, Color32::from_rgb(100, 180, 255))
-        } else if primary {
-            Stroke::new(1.0_f32, Color32::from_rgb(16, 94, 189))
-        } else {
-            Stroke::new(1.0_f32, Color32::from_gray(if dark { 35 } else { 150 }))
-        };
-        let rect = response.rect;
-        let inner = rect.shrink(1.0);
-        let mut mesh = egui::Mesh::default();
-        for (pos, colour) in [
-            (inner.left_top(), top),
-            (inner.right_top(), top),
-            (inner.right_bottom(), bottom),
-            (inner.left_bottom(), bottom),
-        ] {
-            mesh.colored_vertex(pos, colour);
+    let high_contrast = ui.visuals().panel_fill == Color32::BLACK;
+    ui.scope(|ui| {
+        if !primary && !high_contrast {
+            // Keep the frame's layout space when its inactive paint is hidden.
+            let inactive = &mut ui.visuals_mut().widgets.inactive;
+            inactive.weak_bg_fill = Color32::TRANSPARENT;
+            inactive.bg_stroke.color = Color32::TRANSPARENT;
         }
-        mesh.add_triangle(0, 1, 2);
-        mesh.add_triangle(0, 2, 3);
-        let highlight = Color32::from_white_alpha(if down { 0 } else { 15 });
-        ui.painter().set(
-            background,
-            egui::Shape::Vec(vec![
-                egui::Shape::mesh(mesh),
-                egui::Shape::rect_stroke(rect, 2, border, egui::StrokeKind::Inside),
-                egui::Shape::line_segment(
-                    [inner.left_top(), inner.right_top()],
-                    Stroke::new(1.0_f32, highlight),
-                ),
-            ]),
-        );
-    }
-    response
+        ui.add(button.frame_when_inactive(true))
+    })
+    .inner
 }
 
 #[derive(Default)]
@@ -228,17 +301,17 @@ impl NativeUi {
         );
         let viewport = ctx.content_rect();
         let response = egui::Modal::new(Id::new("settings"))
-            .frame(egui::Frame::popup(&ctx.global_style()).inner_margin(16.0))
+            .frame(egui::Frame::window(&ctx.global_style()).inner_margin(16.0))
             .show(ctx, |ui| {
             ui.set_width((viewport.width() - 64.0).clamp(200.0, 440.0));
-            ui.heading("Settings");
+            ui.label(egui::RichText::new("Settings").size(18.0).variation(b"wght", 600.0));
             ui.add_space(8.0);
             ui.style_mut().spacing.scroll.floating = false;
             egui::ScrollArea::vertical()
                 .id_salt("settings_content")
                 .max_height((viewport.height() - 150.0).max(100.0))
                 .show(ui, |ui| {
-                    ui.strong("Appearance");
+                    ui.label(egui::RichText::new("Appearance").variation(b"wght", 600.0));
                     ui.horizontal_wrapped(|ui| {
                         for choice in [Appearance::System, Appearance::Light, Appearance::Dark, Appearance::HighContrast] {
                             ui.radio_value(&mut self.appearance, choice, choice.label());
@@ -248,14 +321,14 @@ impl NativeUi {
                     ui.add_space(12.0);
                     ui.separator();
                     ui.add_space(4.0);
-                    ui.strong("Documents");
+                    ui.label(egui::RichText::new("Documents").variation(b"wght", 600.0));
                     ui.checkbox(&mut state.hide_single_tab, "Hide tabs for a single document");
                     ui.checkbox(&mut state.restore_session, "Restore tabs on startup");
                     ui.weak("Unsaved changes and passwords are not restored.");
                     ui.add_space(12.0);
                     ui.separator();
                     ui.add_space(4.0);
-                    ui.strong("New document view");
+                    ui.label(egui::RichText::new("New document view").variation(b"wght", 600.0));
                     let control_width = (ui.available_width() - 100.0).clamp(100.0, 180.0);
                     egui::Grid::new("default_view").spacing([16.0, 6.0]).show(ui, |ui| {
                         let label = ui.label("Zoom");
@@ -370,7 +443,9 @@ impl NativeUi {
             "Ctrl"
         };
         let viewport = ctx.content_rect();
-        let response = egui::Modal::new(Id::new("shortcut_help")).show(ctx, |ui| {
+        let response = egui::Modal::new(Id::new("shortcut_help"))
+            .frame(egui::Frame::window(&ctx.global_style()).inner_margin(16.0))
+            .show(ctx, |ui| {
             ui.set_width((viewport.width() - 40.0).clamp(200.0, 480.0));
             ui.heading("Keyboard shortcuts");
             ui.style_mut().spacing.scroll.floating = false;
@@ -445,6 +520,100 @@ mod tests {
     use super::*;
 
     #[test]
+    fn toolbar_hover_borders_do_not_move_buttons_or_neighbours() {
+        for appearance in [
+            Appearance::Dark,
+            Appearance::Light,
+            Appearance::HighContrast,
+        ] {
+            let ctx = Context::default();
+            appearance.apply(&ctx);
+            crate::icons::install(&ctx);
+            let mut rectangles = Vec::new();
+            let mut frame = |pointer| {
+                for _ in 0..3 {
+                    ctx.run_ui(
+                        egui::RawInput {
+                            events: vec![egui::Event::PointerMoved(pointer)],
+                            ..Default::default()
+                        },
+                        |ui| {
+                            rectangles.clear();
+                            ui.horizontal(|ui| {
+                                rectangles.push(
+                                    crate::icons::button(ui, crate::icons::Icon::Search, "Search")
+                                        .rect,
+                                );
+                                rectangles.push(
+                                    crate::icons::selectable_button(
+                                        ui,
+                                        crate::icons::Icon::Maximize,
+                                        "Fit page",
+                                        true,
+                                    )
+                                    .rect,
+                                );
+                                rectangles.push(ui.button("Go").rect);
+                            });
+                        },
+                    )
+                    .textures_delta
+                    .clear();
+                }
+                rectangles.clone()
+            };
+            let baseline = frame(egui::pos2(500.0, 200.0));
+            for rect in &baseline {
+                assert_eq!(frame(rect.center()), baseline, "{appearance:?}");
+            }
+            assert_eq!(frame(egui::pos2(500.0, 200.0)), baseline);
+        }
+    }
+
+    #[test]
+    fn toolbar_groups_wrap_without_clipping_and_rejoin_when_widened() {
+        let ctx = Context::default();
+        for width in [640.0, 320.0, 640.0] {
+            let mut buttons = Vec::new();
+            for _ in 0..2 {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 300.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        buttons.clear();
+                        ui.horizontal_wrapped(|ui| {
+                            for label in ["Navigation", "Document"] {
+                                toolbar_group(ui, label, |ui| {
+                                    buttons.push(
+                                        ui.add_sized(
+                                            [200.0, CONTROL_HEIGHT],
+                                            egui::Button::new(label),
+                                        )
+                                        .rect,
+                                    );
+                                });
+                            }
+                        });
+                    },
+                )
+                .textures_delta
+                .clear();
+            }
+            assert!(buttons.iter().all(|rect| rect.right() <= width));
+            if width == 320.0 {
+                assert!(buttons[1].top() > buttons[0].bottom());
+            } else {
+                assert_eq!(buttons[0].top(), buttons[1].top());
+            }
+        }
+    }
+
+    #[test]
     fn appearance_restores_standard_visuals_and_follows_system_changes() {
         let ctx = Context::default();
         Appearance::HighContrast.apply(&ctx);
@@ -459,13 +628,15 @@ mod tests {
         assert_ne!(ctx.global_style().visuals.panel_fill, Color32::BLACK);
         Appearance::System.apply(&ctx);
         for theme in [Theme::Dark, Theme::Light] {
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     system_theme: Some(theme),
                     ..Default::default()
                 },
                 |_| {},
-            );
+            )
+            .textures_delta
+            .clear();
             assert_eq!(ctx.theme(), theme);
         }
     }

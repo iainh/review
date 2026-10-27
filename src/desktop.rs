@@ -295,11 +295,7 @@ impl Desktop {
         } else {
             visuals.widgets.hovered.bg_fill
         };
-        self.bar.background_color = if visuals.dark_mode && appearance != Appearance::HighContrast {
-            egui::Color32::from_gray(30)
-        } else {
-            visuals.panel_fill
-        };
+        self.bar.background_color = crate::native_ui::chrome_fill(visuals);
         self.bar.title_color = foreground;
         self.bar.menu_text_color = foreground;
         self.bar.close_icon_color = foreground;
@@ -362,7 +358,7 @@ mod tests {
         blocked: bool,
     ) -> (Option<Action>, bool) {
         let mut result = (None, false);
-        let _ = ctx.run_ui(
+        ctx.run_ui(
             RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -376,7 +372,9 @@ mod tests {
                 result.0 = next.0.or(result.0.take());
                 result.1 |= next.1;
             },
-        );
+        )
+        .textures_delta
+        .clear();
         result
     }
 
@@ -439,9 +437,10 @@ mod tests {
             key(Key::Enter, Modifiers::NONE),
             false,
         );
-        let output = ctx.run_ui(RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
             desktop.show(ui, false, false, Appearance::System, false);
         });
+        output.textures_delta.clear();
         let tree = output.platform_output.accesskit_update.unwrap();
         for (label, disabled) in [
             ("Open…", false),
@@ -552,9 +551,10 @@ mod tests {
                 .entry(egui::ViewportId::ROOT)
                 .or_default()
                 .maximized = Some(maximized);
-            let output = ctx.run_ui(input.clone(), |ui| {
+            let mut output = ctx.run_ui(input.clone(), |ui| {
                 desktop.show(ui, false, false, Appearance::System, false);
             });
+            output.textures_delta.clear();
             let label = if maximized {
                 "Restore window"
             } else {
@@ -575,9 +575,10 @@ mod tests {
                     data: None,
                 },
             ));
-            let output = ctx.run_ui(input, |ui| {
+            let mut output = ctx.run_ui(input, |ui| {
                 desktop.show(ui, false, false, Appearance::System, false);
             });
+            output.textures_delta.clear();
             assert!(output.viewport_output[&egui::ViewportId::ROOT].commands.iter().any(|command| {
                 matches!(command, egui::ViewportCommand::Maximized(value) if *value == !maximized)
             }));
@@ -651,7 +652,7 @@ mod tests {
         let ctx = Context::default();
         let mut desktop = Desktop::default();
         let mut run = |events| {
-            ctx.run_ui(
+            let mut output = ctx.run_ui(
                 RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -663,7 +664,9 @@ mod tests {
                 |ui| {
                     desktop.show(ui, false, false, Appearance::System, false);
                 },
-            )
+            );
+            output.textures_delta.clear();
+            output
         };
         run(vec![]);
         run(vec![]); // Settle the initial Area sizing pass before interaction.
@@ -694,7 +697,7 @@ mod tests {
     #[test]
     fn only_root_close_requests_document_protection() {
         let ctx = Context::default();
-        let output = ctx.run_ui(RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
             ui.ctx().send_viewport_cmd_to(
@@ -702,10 +705,12 @@ mod tests {
                 egui::ViewportCommand::Close,
             );
         });
+        output.textures_delta.clear();
         assert!(!close_requested(&output));
-        let output = ctx.run_ui(RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close)
         });
+        output.textures_delta.clear();
         assert!(close_requested(&output));
     }
 

@@ -428,7 +428,7 @@ mod tests {
         time: f64,
         allowed: bool,
     ) -> egui::FullOutput {
-        ctx.run_ui(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -448,7 +448,9 @@ mod tests {
                     )
                     .unwrap();
             },
-        )
+        );
+        output.textures_delta.clear();
+        output
     }
 
     fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
@@ -726,15 +728,16 @@ mod tests {
                 end,
                 ..Default::default()
             };
-            let output = ctx.run_ui(Default::default(), |ui| {
+            let mut output = ctx.run_ui(Default::default(), |ui| {
                 selection.copy(ui.ctx(), &document).unwrap()
             });
+            output.textures_delta.clear();
             assert_eq!(
                 clipboard(output).as_deref(),
                 Some("pha alpha\nNeedle\nphrase\nLast ")
             );
             assert!(selection.cache.is_empty());
-            let output = ctx.run_ui(Default::default(), |ui| {
+            let mut output = ctx.run_ui(Default::default(), |ui| {
                 selection
                     .pages_ui(
                         ui,
@@ -751,6 +754,7 @@ mod tests {
                     )
                     .unwrap()
             });
+            output.textures_delta.clear();
             assert!(clipboard(output).is_none());
             assert!(selection.cache.is_empty());
             assert!(selection.anchor == selection.end);

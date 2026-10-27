@@ -234,7 +234,7 @@ impl Tabs {
             let frame = egui::Frame::new().fill(root.visuals().window_fill);
             egui::Panel::top("document_tabs")
                 .frame(frame)
-                .show_inside(root, |ui| {
+                .show(root, |ui| {
                     if !enabled && ui.is_enabled() {
                         ui.disable();
                     }
@@ -369,7 +369,7 @@ fn document_tab(
     let accent = if ui.visuals().panel_fill == egui::Color32::BLACK {
         ui.visuals().selection.stroke.color
     } else {
-        ui.visuals().selection.bg_fill
+        ui.visuals().hyperlink_color
     };
     if dirty {
         ui.painter().circle_filled(
@@ -427,7 +427,7 @@ mod tests {
             let ctx = egui::Context::default();
             ctx.enable_accesskit();
             let mut action = None;
-            let output = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     events: vec![egui::Event::Key {
                         key: egui::Key::W,
@@ -440,6 +440,7 @@ mod tests {
                 },
                 |ui| action = tabs.ui(ui, true, None, hide),
             );
+            output.textures_delta.clear();
             let tree = output.platform_output.accesskit_update.unwrap();
             assert_eq!(
                 tree.nodes
@@ -470,7 +471,7 @@ mod tests {
         ctx.enable_accesskit();
         let mut draw = |events, enabled| {
             let mut action = None;
-            let output = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -481,6 +482,7 @@ mod tests {
                 },
                 |ui| action = tabs.ui(ui, enabled, None, false),
             );
+            output.textures_delta.clear();
             (action, output)
         };
         let (_, output) = draw(vec![], true);
@@ -562,7 +564,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut draw = |key, modifiers, enabled| {
             let mut action = None;
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -578,7 +580,9 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| action = tabs.ui(ui, enabled, None, false),
-            );
+            )
+            .textures_delta
+            .clear();
             action
         };
         assert!(matches!(

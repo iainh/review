@@ -70,7 +70,7 @@ impl TitleBar {
                     .inner_margin(Margin::same(0))
                     .outer_margin(Margin::same(0)),
             )
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 let title_bar_rect = ui.available_rect_before_wrap();
 
                 if title_bar_rect.width() <= 0.0 || title_bar_rect.height() <= 0.0 {
@@ -282,7 +282,7 @@ impl TitleBar {
                     .inner_margin(Margin::same(0))
                     .outer_margin(Margin::same(0)),
             )
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 let title_bar_rect = ui.available_rect_before_wrap();
 
                 if title_bar_rect.width() <= 0.0 || title_bar_rect.height() <= 0.0 {

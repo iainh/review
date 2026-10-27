@@ -80,18 +80,49 @@ impl Sidebar {
             .default_size(self.width)
             .size_range(200.0..=400.0)
             .resizable(true)
-            .frame(egui::Frame::side_top_panel(root.style()).fill(root.visuals().faint_bg_color))
-            .show_inside(root, |ui| {
-                egui::Frame::new()
-                    .fill(ui.visuals().panel_fill)
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        crate::native_ui::panel_bevel(ui);
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(&mut self.pages, false, "Outline");
-                            ui.selectable_value(&mut self.pages, true, "Pages");
-                        });
+            .frame(
+                egui::Frame::side_top_panel(root.style())
+                    .inner_margin(egui::Margin::symmetric(8, 6)),
+            )
+            .show(root, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Document")
+                            .size(11.0)
+                            .variation(b"wght", 600.0),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.weak(format!("{} pages", document.page_count()));
                     });
+                });
+                ui.add_space(4.0);
+                ui.columns(2, |columns| {
+                    for (column, (pages, label)) in columns
+                        .iter_mut()
+                        .zip([(false, "Outline"), (true, "Pages")])
+                    {
+                        let selected = self.pages == pages;
+                        let response = column.add_sized(
+                            [column.available_width(), crate::native_ui::CONTROL_HEIGHT],
+                            egui::Button::selectable(selected, label).frame(false),
+                        );
+                        if selected {
+                            let colour = if column.visuals().panel_fill == Color32::BLACK {
+                                column.visuals().selection.stroke.color
+                            } else {
+                                column.visuals().hyperlink_color
+                            };
+                            column.painter().hline(
+                                response.rect.x_range(),
+                                response.rect.bottom(),
+                                egui::Stroke::new(2.0, colour),
+                            );
+                        }
+                        if response.clicked() {
+                            self.pages = pages;
+                        }
+                    }
+                });
                 ui.separator();
                 if self.pages {
                     destination = self
@@ -104,6 +135,9 @@ impl Sidebar {
                         }
                         Ok(outline) => {
                             egui::ScrollArea::vertical().show(ui, |ui| {
+                                ui.spacing_mut().interact_size.y = 24.0;
+                                ui.spacing_mut().button_padding = egui::vec2(4.0, 2.0);
+                                ui.spacing_mut().item_spacing.y = 2.0;
                                 outline_rows(ui, outline, document, &mut destination);
                             });
                         }
@@ -274,17 +308,19 @@ fn outline_rows(
                 .map(|dest| dest.loc.page_number as usize)
                 .filter(|&page| page < document.page_count());
             let mut label = |ui: &mut egui::Ui| {
-                let text = match page {
-                    Some(page) => {
-                        format!("{}  ·  {}", entry.title, document.page_description(page))
-                    }
-                    None => entry.title.clone(),
-                };
+                let caption = page
+                    .map(|page| document.page_description(page))
+                    .unwrap_or_default();
                 if ui
                     .add_enabled(
                         page.is_some(),
-                        egui::Button::selectable(page == Some(document.current_page()), text)
-                            .wrap(),
+                        egui::Button::selectable(
+                            page == Some(document.current_page()),
+                            entry.title.as_str(),
+                        )
+                        .shortcut_text(caption)
+                        .min_size(egui::vec2(ui.available_width(), 24.0))
+                        .wrap(),
                     )
                     .clicked()
                 {
@@ -347,9 +383,11 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !sidebar.thumbnails.contains_key(&0) {
             worker.begin_frame();
-            let _ = ctx.run_ui(input.clone(), |ui| {
+            ctx.run_ui(input.clone(), |ui| {
                 sidebar.ui(ui, &document, &mut worker);
-            });
+            })
+            .textures_delta
+            .clear();
             worker.end_frame(&ctx);
             assert!(
                 std::time::Instant::now() < deadline,
@@ -364,9 +402,11 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !sidebar.thumbnails.contains_key(&44) {
             worker.begin_frame();
-            let _ = ctx.run_ui(input.clone(), |ui| {
+            ctx.run_ui(input.clone(), |ui| {
                 sidebar.ui(ui, &document, &mut worker);
-            });
+            })
+            .textures_delta
+            .clear();
             worker.end_frame(&ctx);
             assert!(
                 std::time::Instant::now() < deadline,

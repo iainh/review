@@ -9,10 +9,10 @@ license = "AGPL-3.0-only"
 anyhow = "1.0"
 caseless = "0.2"
 directories = "6"
-egui = "0.34.3"
+egui = "0.36.2"
 egui-desktop = { path = "vendor/egui-desktop" }
-egui-wgpu = "0.34.3"
-egui-winit = { version = "0.34.3", default-features = false, features = ["accesskit", "clipboard", "wayland", "x11"] }
+egui-wgpu = "0.36.2"
+egui-winit = { version = "0.36.2", default-features = false, features = ["accesskit", "clipboard", "wayland", "x11"] }
 foldhash = "0.2"
 font-kit = "0.14"
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -28,7 +28,7 @@ tempfile = "3"
 unicode-bidi = "0.3"
 unicode-segmentation = "1.12"
 url = "2"
-wgpu = "29"
+wgpu = "30"
 winit = "0.30"
 zeroize = "1"
 

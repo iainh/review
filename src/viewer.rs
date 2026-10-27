@@ -593,11 +593,11 @@ impl Viewer {
             event, egui::Event::Key { key: Key::Enter, pressed: true, modifiers, .. } if modifiers.shift
         )));
 
-        egui::Panel::top("toolbar").show_inside(root, |ui| {
-            crate::native_ui::panel_bevel(ui);
+        egui::Panel::top("toolbar").frame(crate::native_ui::toolbar_frame(root.style())).show(root, |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.visuals_mut().disabled_alpha = 0.65;
             ui.horizontal_wrapped(|ui| {
+                crate::native_ui::toolbar_group(ui, "Navigation", |ui| {
                 if icons::selectable_button(ui, Icon::PanelLeft, "Sidebar (F9)", self.sidebar.open).clicked() {
                     self.sidebar.open = !self.sidebar.open;
                 }
@@ -607,7 +607,8 @@ impl Viewer {
                 if ui.add_enabled_ui(self.history.can_forward(), |ui| icons::button(ui, Icon::ChevronRight, "Forward (Alt+Right)")).inner.clicked() {
                     self.navigate_history(false);
                 }
-                ui.separator();
+                });
+                crate::native_ui::toolbar_group(ui, "Page", |ui| {
                 if ui.add_enabled_ui(self.document.current_page() > 0, |ui| icons::button(ui, Icon::ArrowLeft, "Previous")).inner.clicked() {
                     self.change_page(-1);
                 }
@@ -633,7 +634,9 @@ impl Viewer {
                     self.submit_page();
                 }
                 if shortcuts
-                    && (field.has_focus() || field.lost_focus())
+                    // lost_focus spans two frames in egui 0.36. Only the
+                    // field owning this keypress may consume Escape.
+                    && (field.has_focus() || ctx.memory(|memory| memory.had_focus_last_frame(field.id)))
                     && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
                 {
                     field.surrender_focus();
@@ -642,9 +645,11 @@ impl Viewer {
                 if let Ok(label) = self.document.page_label(self.document.current_page())
                     && !label.is_empty() && label != (self.document.current_page() + 1).to_string()
                 {
-                    ui.label(format!("· {label}"));
+                    ui.add_sized([100.0, crate::native_ui::CONTROL_HEIGHT], egui::Label::new(format!("· {label}")).truncate())
+                        .on_hover_text(label);
                 }
-                ui.separator();
+                });
+                crate::native_ui::toolbar_group(ui, "Zoom", |ui| {
                 if icons::button(ui, Icon::ZoomOut, "Zoom out").clicked() {
                     self.change_zoom(0.8);
                 }
@@ -672,7 +677,7 @@ impl Viewer {
                     }
                 }
                 if shortcuts
-                    && (field.has_focus() || field.lost_focus())
+                    && (field.has_focus() || ctx.memory(|memory| memory.had_focus_last_frame(field.id)))
                     && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
                 {
                     field.surrender_focus();
@@ -690,7 +695,8 @@ impl Viewer {
                 if icons::selectable_button(ui, Icon::Maximize, "Fit page (0)", self.zoom == Zoom::FitPage).clicked() {
                     self.zoom = Zoom::FitPage;
                 }
-                ui.separator();
+                });
+                crate::native_ui::toolbar_group(ui, "Document", |ui| {
                 if icons::selectable_button(ui, Icon::Search, "Search (Ctrl+F / Cmd+F)", self.search.open).clicked() {
                     self.search.open = true;
                     focus_search = true;
@@ -780,6 +786,7 @@ impl Viewer {
                 } else if self.document.is_dirty() {
                     ui.colored_label(ui.visuals().warn_fg_color, "● Unsaved");
                 }
+                });
             });
             if self.annotations.open {
                 ui.horizontal(|ui| {
@@ -824,153 +831,161 @@ impl Viewer {
         self.ocr.ui(root, &self.document);
 
         if self.search.open {
-            egui::Panel::top("search_bar").show_inside(root, |ui| {
-                let mut reveal_result = false;
-                ui.horizontal_wrapped(|ui| {
-                    let search_label = ui.label("Find");
-                    let field = ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.search.query)
-                                .id(search_query_id)
-                                .desired_width(220.0)
-                                .hint_text("Search this document"),
-                        )
-                        .labelled_by(search_label.id);
-                    if field.changed() {
-                        self.search.clear_results();
-                    }
-                    if focus_search {
-                        select_text(&ctx, &field, self.search.query.chars().count());
-                    }
-                    let changed = ui
-                        .checkbox(&mut self.search.options.case_sensitive, "Case sensitive")
-                        .changed()
-                        | ui.checkbox(&mut self.search.options.whole_word, "Whole words")
-                            .changed();
-                    if changed && !self.search.submitted.is_empty() {
-                        self.search.start(&self.document, &ctx);
-                    }
-                    // Apply edits/cancellation before polling, so an old page
-                    // cannot auto-navigate in the frame that replaces a query.
-                    let selected = self.search.selected;
-                    if let Some(page) = self.search.poll()
-                        && !self
-                            .forms
-                            .focus_ids()
-                            .any(|id| ctx.memory(|memory| memory.focused() == Some(id)))
-                    {
-                        self.go_to_page(page);
-                        self.reveal_match = true;
-                    }
-                    reveal_result = selected != self.search.selected;
-                    let enter =
-                        field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-                    if ui.button("Find").clicked() || (enter && self.search.submitted.is_empty()) {
-                        self.search.start(&self.document, &ctx);
-                    } else if enter {
-                        self.advance_match(enter_backwards);
-                    }
-                    if enter {
-                        field.request_focus();
-                    }
-                    let ready = !self.search.matches.is_empty();
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Previous match"))
-                        .clicked()
-                    {
-                        self.advance_match(true);
-                    }
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Next match"))
-                        .clicked()
-                    {
-                        self.advance_match(false);
-                    }
-                    if self.search.scanning() {
-                        ui.spinner();
-                        ui.label(format!(
-                            "Searching… {}/{} pages · {} / {} matches so far",
-                            self.search.scanned,
-                            self.search.total,
-                            self.search.selected.map_or(0, |index| index + 1),
-                            self.search.matches.len()
-                        ));
-                    } else if self.search.error.is_none() && !self.search.submitted.is_empty() {
-                        if self.search.matches.is_empty() {
-                            ui.label("No matches");
-                        } else {
+            egui::Panel::top("search_bar")
+                .frame(crate::native_ui::toolbar_frame(root.style()))
+                .show(root, |ui| {
+                    let mut reveal_result = false;
+                    ui.horizontal_wrapped(|ui| {
+                        let search_label = ui.label("Find");
+                        let field = ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.search.query)
+                                    .id(search_query_id)
+                                    .desired_width(220.0)
+                                    .hint_text("Search this document"),
+                            )
+                            .labelled_by(search_label.id);
+                        if field.changed() {
+                            self.search.clear_results();
+                        }
+                        if focus_search {
+                            select_text(&ctx, &field, self.search.query.chars().count());
+                        }
+                        let changed = ui
+                            .checkbox(&mut self.search.options.case_sensitive, "Case sensitive")
+                            .changed()
+                            | ui.checkbox(&mut self.search.options.whole_word, "Whole words")
+                                .changed();
+                        if changed && !self.search.submitted.is_empty() {
+                            self.search.start(&self.document, &ctx);
+                        }
+                        // Apply edits/cancellation before polling, so an old page
+                        // cannot auto-navigate in the frame that replaces a query.
+                        let selected = self.search.selected;
+                        if let Some(page) = self.search.poll()
+                            && !self
+                                .forms
+                                .focus_ids()
+                                .any(|id| ctx.memory(|memory| memory.focused() == Some(id)))
+                        {
+                            self.go_to_page(page);
+                            self.reveal_match = true;
+                        }
+                        reveal_result = selected != self.search.selected;
+                        let enter =
+                            field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+                        if ui.button("Find").clicked()
+                            || (enter && self.search.submitted.is_empty())
+                        {
+                            self.search.start(&self.document, &ctx);
+                        } else if enter {
+                            self.advance_match(enter_backwards);
+                        }
+                        if enter {
+                            field.request_focus();
+                        }
+                        let ready = !self.search.matches.is_empty();
+                        if ui
+                            .add_enabled(ready, egui::Button::new("Previous match"))
+                            .clicked()
+                        {
+                            self.advance_match(true);
+                        }
+                        if ui
+                            .add_enabled(ready, egui::Button::new("Next match"))
+                            .clicked()
+                        {
+                            self.advance_match(false);
+                        }
+                        if self.search.scanning() {
+                            ui.spinner();
                             ui.label(format!(
-                                "{} / {} matches",
-                                self.search.selected.unwrap_or(0) + 1,
+                                "Searching… {}/{} pages · {} / {} matches so far",
+                                self.search.scanned,
+                                self.search.total,
+                                self.search.selected.map_or(0, |index| index + 1),
                                 self.search.matches.len()
                             ));
-                        }
-                    }
-                    if ui.button("Close").clicked() {
-                        self.search.open = false;
-                        self.search.clear_results();
-                        field.surrender_focus();
-                    }
-                });
-                if let Some(error) = &self.search.error {
-                    ui.colored_label(Color32::LIGHT_RED, format!("Search failed: {error}"));
-                }
-                if !self.search.matches.is_empty() {
-                    let mut results = egui::ScrollArea::vertical()
-                        .id_salt("search_results")
-                        .max_height(112.0)
-                        .min_scrolled_height(112.0)
-                        .auto_shrink([false, true]);
-                    if (self.reveal_match || reveal_result)
-                        && let Some(index) = self.search.selected
-                    {
-                        results = results.vertical_scroll_offset(
-                            index as f32 * (22.0 + ui.spacing().item_spacing.y),
-                        );
-                    }
-                    results.show_rows(ui, 22.0, self.search.matches.len(), |ui, rows| {
-                        for index in rows {
-                            let hit = &self.search.matches[index];
-                            let mut label = egui::text::LayoutJob::default();
-                            let font = egui::TextStyle::Body.resolve(ui.style());
-                            let colour = ui.visuals().text_color();
-                            let normal = egui::TextFormat {
-                                font_id: font,
-                                color: colour,
-                                ..Default::default()
-                            };
-                            label.append(
-                                &format!("{}   ", self.document.page_description(hit.page)),
-                                0.0,
-                                normal.clone(),
-                            );
-                            label.append(&hit.snippet[..hit.emphasis.start], 0.0, normal.clone());
-                            let mut emphasized = normal.clone();
-                            emphasized.background =
-                                Color32::from_rgba_unmultiplied(255, 145, 0, 70);
-                            label.append(&hit.snippet[hit.emphasis.clone()], 0.0, emphasized);
-                            label.append(&hit.snippet[hit.emphasis.end..], 0.0, normal);
-                            if ui
-                                .add(
-                                    egui::Button::selectable(
-                                        self.search.selected == Some(index),
-                                        label,
-                                    )
-                                    .min_size(egui::vec2(0.0, 22.0))
-                                    .wrap_mode(egui::TextWrapMode::Truncate),
-                                )
-                                .on_hover_text(&hit.snippet)
-                                .clicked()
-                            {
-                                let page = hit.page;
-                                self.search.selected = Some(index);
-                                self.go_to_page(page);
-                                self.reveal_match = true;
+                        } else if self.search.error.is_none() && !self.search.submitted.is_empty() {
+                            if self.search.matches.is_empty() {
+                                ui.label("No matches");
+                            } else {
+                                ui.label(format!(
+                                    "{} / {} matches",
+                                    self.search.selected.unwrap_or(0) + 1,
+                                    self.search.matches.len()
+                                ));
                             }
                         }
+                        if ui.button("Close").clicked() {
+                            self.search.open = false;
+                            self.search.clear_results();
+                            field.surrender_focus();
+                        }
                     });
-                }
-            });
+                    if let Some(error) = &self.search.error {
+                        ui.colored_label(Color32::LIGHT_RED, format!("Search failed: {error}"));
+                    }
+                    if !self.search.matches.is_empty() {
+                        let mut results = egui::ScrollArea::vertical()
+                            .id_salt("search_results")
+                            .max_height(112.0)
+                            .min_scrolled_height(112.0)
+                            .auto_shrink([false, true]);
+                        if (self.reveal_match || reveal_result)
+                            && let Some(index) = self.search.selected
+                        {
+                            results = results.vertical_scroll_offset(
+                                index as f32 * (22.0 + ui.spacing().item_spacing.y),
+                            );
+                        }
+                        results.show_rows(ui, 22.0, self.search.matches.len(), |ui, rows| {
+                            for index in rows {
+                                let hit = &self.search.matches[index];
+                                let mut label = egui::text::LayoutJob::default();
+                                let font = egui::TextStyle::Body.resolve(ui.style());
+                                let colour = ui.visuals().text_color();
+                                let normal = egui::TextFormat {
+                                    font_id: font,
+                                    color: colour,
+                                    ..Default::default()
+                                };
+                                label.append(
+                                    &format!("{}   ", self.document.page_description(hit.page)),
+                                    0.0,
+                                    normal.clone(),
+                                );
+                                label.append(
+                                    &hit.snippet[..hit.emphasis.start],
+                                    0.0,
+                                    normal.clone(),
+                                );
+                                let mut emphasized = normal.clone();
+                                emphasized.background =
+                                    Color32::from_rgba_unmultiplied(255, 145, 0, 70);
+                                label.append(&hit.snippet[hit.emphasis.clone()], 0.0, emphasized);
+                                label.append(&hit.snippet[hit.emphasis.end..], 0.0, normal);
+                                if ui
+                                    .add(
+                                        egui::Button::selectable(
+                                            self.search.selected == Some(index),
+                                            label,
+                                        )
+                                        .min_size(egui::vec2(0.0, 22.0))
+                                        .wrap_mode(egui::TextWrapMode::Truncate),
+                                    )
+                                    .on_hover_text(&hit.snippet)
+                                    .clicked()
+                                {
+                                    let page = hit.page;
+                                    self.search.selected = Some(index);
+                                    self.go_to_page(page);
+                                    self.reveal_match = true;
+                                }
+                            }
+                        });
+                    }
+                });
         }
 
         if shortcuts {
@@ -1068,7 +1083,7 @@ impl Viewer {
         let mut page_edited = false;
         let frame = egui::Frame::central_panel(root.style()).fill(root.visuals().faint_bg_color);
         let panel = egui::CentralPanel::default().frame(frame);
-        panel.show_inside(root, |ui| {
+        panel.show(root, |ui| {
             if !shortcuts && ui.is_enabled() {
                 ui.disable();
             }
@@ -1201,7 +1216,7 @@ mod tests {
         ctx: &egui::Context,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
-        ctx.run_ui(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1212,7 +1227,9 @@ mod tests {
                 ..Default::default()
             },
             |ui| viewer.ui(ui, &mut false),
-        )
+        );
+        output.textures_delta.clear();
+        output
     }
 
     fn links_viewer() -> (tempfile::TempDir, Viewer) {
@@ -1458,7 +1475,7 @@ mod tests {
         let mut time = 0.0;
         let mut draw = |viewer: &mut Viewer, tab, events| {
             time += 1.0;
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -1471,7 +1488,9 @@ mod tests {
                 |ui| {
                     ui.push_id(("document", tab), |ui| viewer.ui(ui, &mut false));
                 },
-            );
+            )
+            .textures_delta
+            .clear();
         };
         let value = |viewer: &Viewer| {
             viewer
@@ -1535,7 +1554,7 @@ mod tests {
         let mut time = 0.0;
         let mut draw = |viewer: &mut Viewer, tab: u64, events| {
             time += 1.0;
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -1548,7 +1567,9 @@ mod tests {
                 |ui| {
                     ui.push_id(("document", tab), |ui| viewer.ui(ui, &mut false));
                 },
-            );
+            )
+            .textures_delta
+            .clear();
         };
         draw(&mut first, 1, vec![key(Key::F)]);
         draw(&mut first, 1, vec![egui::Event::Text("first query".into())]);
@@ -1644,8 +1665,15 @@ mod tests {
         // Native worker/font startup competes with parallel tests on CI. This
         // verifies the settled view, not a five-second rendering benchmark.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut previous_geometry = Vec::new();
         loop {
             let output = frame(viewer, ctx, vec![]);
+            let geometry: Vec<_> = viewer
+                .reading
+                .screen_pages
+                .iter()
+                .map(|(page, transform)| (*page, transform.rect))
+                .collect();
             let ready = !viewer.reading.displayed.is_empty()
                 && viewer.reading.displayed.values().all(|p| {
                     p.rendered.is_some_and(|key| {
@@ -1656,9 +1684,12 @@ mod tests {
                     })
                 })
                 && !viewer.restore_position;
-            if ready {
+            // Font and toolbar measurement must also settle before deriving
+            // pointer positions from PDF transforms.
+            if ready && geometry == previous_geometry {
                 return output;
             }
+            previous_geometry = geometry;
             assert!(
                 std::time::Instant::now() < deadline,
                 "render did not settle: error={:?}, rendered={:?}, zoom={}, restore={}",
@@ -2120,7 +2151,7 @@ mod tests {
             let mut viewer = Viewer::new(document);
             let ctx = egui::Context::default();
             let run = |viewer: &mut Viewer, events| {
-                ctx.run_ui(
+                let mut output = ctx.run_ui(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,
@@ -2130,7 +2161,9 @@ mod tests {
                         ..Default::default()
                     },
                     |ui| viewer.ui(ui, &mut false),
-                )
+                );
+                output.textures_delta.clear();
+                output
             };
             settled_frame(&mut viewer, &ctx);
             run(
@@ -2177,7 +2210,7 @@ mod tests {
             modifiers: egui::Modifiers::COMMAND,
         };
         let run = |viewer: &mut Viewer, events| {
-            ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -2187,7 +2220,9 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| viewer.ui(ui, &mut false),
-            )
+            );
+            output.textures_delta.clear();
+            output
         };
         settled_frame(&mut viewer, &ctx);
         run(&mut viewer, vec![command(egui::Key::A)]);
@@ -2249,7 +2284,7 @@ mod tests {
             vec![egui::Event::Text("1".into())],
             vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
         ] {
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -2262,7 +2297,9 @@ mod tests {
                     library.ui(ui, &mut state, Some(&viewer), true);
                     viewer.ui(ui, &mut false);
                 },
-            );
+            )
+            .textures_delta
+            .clear();
         }
         assert_eq!(viewer.document.current_page(), 0);
     }
@@ -2290,12 +2327,16 @@ mod tests {
             ..Default::default()
         };
         // Exercise the empty asynchronous frame as well as the finished canvas.
-        let _ = ctx.run_ui(input.clone(), |ui| viewer.ui(ui, &mut false));
+        ctx.run_ui(input.clone(), |ui| viewer.ui(ui, &mut false))
+            .textures_delta
+            .clear();
         assert_eq!(viewer.reading_state(), location);
         settled_frame(&mut viewer, &ctx);
         assert_eq!(viewer.reading_state(), location);
         viewer.change_page(1);
-        let _ = ctx.run_ui(input.clone(), |ui| viewer.ui(ui, &mut false));
+        ctx.run_ui(input.clone(), |ui| viewer.ui(ui, &mut false))
+            .textures_delta
+            .clear();
         assert_eq!(viewer.reading_state().scroll, [0.0, 0.0]);
         viewer.restore_reading(&ReadingState {
             page: usize::MAX,
@@ -2335,7 +2376,9 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
+            ctx.run_ui(input, |ui| viewer.ui(ui, &mut false))
+                .textures_delta
+                .clear();
         }
         assert_eq!(viewer.zoom, crate::zoom::Zoom::Percent(1.375));
         for events in [
@@ -2351,7 +2394,9 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
+            ctx.run_ui(input, |ui| viewer.ui(ui, &mut false))
+                .textures_delta
+                .clear();
         }
         assert_eq!(viewer.zoom, crate::zoom::Zoom::Percent(1.375));
     }
@@ -2381,7 +2426,9 @@ mod tests {
                 }],
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
+            ctx.run_ui(input, |ui| viewer.ui(ui, &mut false))
+                .textures_delta
+                .clear();
             assert_eq!(viewer.printing.open, open);
             assert!(viewer.search.open);
             assert!(viewer.sidebar.open);
@@ -2419,7 +2466,9 @@ mod tests {
                 }],
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
+            ctx.run_ui(input, |ui| viewer.ui(ui, &mut false))
+                .textures_delta
+                .clear();
             assert_eq!(viewer.printing.open, allowed);
             assert_eq!(viewer.error.is_none(), allowed);
         }
@@ -2449,7 +2498,9 @@ mod tests {
                 events: vec![event],
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
+            ctx.run_ui(input, |ui| viewer.ui(ui, &mut false))
+                .textures_delta
+                .clear();
             assert_eq!(viewer.page_input, expected);
             assert_eq!(viewer.document.current_page(), 0);
         }
@@ -2481,17 +2532,21 @@ mod tests {
                 egui::Pos2::ZERO,
                 egui::vec2(960.0, 720.0),
             )),
-            events: vec![egui::Event::Key {
-                key: egui::Key::F3,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::SHIFT,
-            }],
-            modifiers: egui::Modifiers::NONE,
+            events: vec![
+                egui::Event::Key {
+                    key: egui::Key::F3,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::SHIFT,
+                },
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
             ..Default::default()
         };
-        let _ = ctx.run_ui(input, |ui| viewer.ui(ui, &mut false));
+        ctx.run_ui(input, |ui| viewer.ui(ui, &mut false))
+            .textures_delta
+            .clear();
         assert_eq!(viewer.search.selected, Some(2));
         assert_eq!(viewer.document.current_page(), 1);
     }
@@ -2519,6 +2574,8 @@ mod tests {
                 },
                 |ui| viewer.ui(ui, &mut false),
             )
+            .textures_delta
+            .clear();
         };
         viewer
             .document

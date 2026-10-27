@@ -321,9 +321,14 @@ AT-SPI; their actions remain disabled in Review. Native maximize/restore depends
 on compositor support; Sway does not acknowledge those requests.
 
 The shell uses a local adaptation of published `egui-desktop` 0.2.5 for egui
-0.34.3. Review retains its winit/wgpu renderer and does not use eframe or an
+0.36.2. Review retains its winit/wgpu renderer and does not use eframe or an
 older egui. Provenance and compatibility changes are documented in
 [`vendor/README.md`](vendor/README.md).
+
+Shell styling uses a shared Solidcraft-inspired light/dark palette, flat toolbar
+controls and flush docked panels. Floating menus and dialogs use rounded frames
+and restrained shadows. System fonts, keyboard focus, high contrast and PDF page
+colours remain independent of these surface treatments.
 
 **Accessible controls do not make a raster PDF accessible.** Open **Page text**
 or press **Ctrl+Shift+T** (**Cmd+Shift+T** on macOS) to read the current page's

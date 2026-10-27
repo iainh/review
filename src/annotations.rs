@@ -382,7 +382,7 @@ impl AnnotationUi {
         self.refresh(document)?;
         let mut apply = false;
         let mut delete = false;
-        egui::Panel::right("annotations").default_size(260.0).size_range(220.0..=380.0).show_inside(root, |ui| {
+        egui::Panel::right("annotations").default_size(260.0).size_range(220.0..=380.0).show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Annotations");
                 if ui.button("Close").clicked() { self.open = false; self.tool = None; self.stroke.clear(); }
@@ -645,21 +645,24 @@ mod tests {
                         modifiers: egui::Modifiers::NONE,
                     });
                 }
-                let _ = context.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(1280.0, 900.0),
-                        )),
-                        events,
-                        ..Default::default()
-                    },
-                    |ui| {
-                        annotations
-                            .page_ui(ui, &mut document, &[(0, page)], || edits += 1)
-                            .unwrap();
-                    },
-                );
+                context
+                    .run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(1280.0, 900.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            annotations
+                                .page_ui(ui, &mut document, &[(0, page)], || edits += 1)
+                                .unwrap();
+                        },
+                    )
+                    .textures_delta
+                    .clear();
             }
             assert_eq!(edits, 1);
             let notes = document.annotations(0).unwrap();
@@ -698,26 +701,29 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             });
         }
-        let _ = context.run_ui(input, |root| {
-            assert!(root.input(|i| i.pointer.primary_released()));
-            root.disable();
-            assert!(
-                !annotations
-                    .page_ui(
-                        root,
-                        &mut document,
-                        &[(
-                            0,
-                            crate::layout::PageTransform {
-                                rect: root.max_rect(),
-                                rotation: Default::default()
-                            }
-                        )],
-                        || {}
-                    )
-                    .unwrap()
-            );
-        });
+        context
+            .run_ui(input, |root| {
+                assert!(root.input(|i| i.pointer.primary_released()));
+                root.disable();
+                assert!(
+                    !annotations
+                        .page_ui(
+                            root,
+                            &mut document,
+                            &[(
+                                0,
+                                crate::layout::PageTransform {
+                                    rect: root.max_rect(),
+                                    rotation: Default::default()
+                                }
+                            )],
+                            || {}
+                        )
+                        .unwrap()
+                );
+            })
+            .textures_delta
+            .clear();
         assert!(annotations.stroke.is_empty());
         assert!(!document.is_dirty());
         assert!(document.annotations(0).unwrap().is_empty());

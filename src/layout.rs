@@ -233,7 +233,7 @@ impl PageLayout {
     pub fn visible(&self, viewport: Rect) -> impl Iterator<Item = &PagePlacement> {
         self.pages
             .iter()
-            .filter(move |p| p.rect.intersects(viewport))
+            .filter(move |p| p.rect.intersect(viewport).is_positive())
     }
 }
 
@@ -242,13 +242,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn visible_pages_require_area_not_just_a_touching_edge() {
+        let layout = PageLayout::new(
+            &[(300.0, 400.0), (300.0, 200.0)],
+            0,
+            LayoutMode::Continuous,
+            Rotation::None,
+            Zoom::FitPage,
+            Vec2::new(600.0, 500.0),
+        );
+        let next_page = layout.page(1).rect;
+        let viewport = Rect::from_min_max(Pos2::ZERO, egui::pos2(600.0, next_page.min.y));
+        let visible = |viewport| layout.visible(viewport).map(|p| p.page).collect::<Vec<_>>();
+        assert_eq!(visible(viewport), [0]);
+        assert_eq!(visible(viewport.expand2(Vec2::new(0.0, 0.5))), [0, 1]);
+        let beside_page = Rect::from_min_max(
+            egui::pos2(next_page.max.x, next_page.min.y),
+            egui::pos2(next_page.max.x + 100.0, next_page.max.y),
+        );
+        assert!(visible(beside_page).is_empty());
+        assert_eq!(visible(beside_page.translate(Vec2::new(-0.5, 0.0))), [1]);
+    }
+
+    #[test]
     fn rotated_tile_mesh_maps_original_core_and_overlap_uvs() {
         let transform = PageTransform {
             rect: Rect::from_min_size(egui::pos2(37.0, 83.0), Vec2::new(800.0, 300.0)),
             rotation: Rotation::Clockwise,
         };
         let ctx = egui::Context::default();
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             transform.image_region(
                 ui.painter(),
                 egui::TextureId::User(7),
@@ -256,6 +279,7 @@ mod tests {
                 Rect::from_min_max(egui::pos2(0.01, 0.02), egui::pos2(0.9, 0.8)),
             );
         });
+        output.textures_delta.clear();
         let mesh = output
             .shapes
             .iter()

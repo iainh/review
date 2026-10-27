@@ -187,7 +187,7 @@ impl ReadingSurface {
             .animated(false)
             .auto_shrink([false, false])
             .scroll_source(egui::scroll_area::ScrollSource {
-                drag: false,
+                drag: egui::scroll_area::DragScroll::Never,
                 ..Default::default()
             });
         if let Some((page, point, screen)) = anchor {
